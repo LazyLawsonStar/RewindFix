@@ -7,6 +7,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSingleton<StackTraceParser>();
 builder.Services.AddSingleton<SourceContextReader>();
+builder.Services.AddSingleton<RootCauseAnalyzer>();
 
 var connectionString = builder.Configuration
     .GetConnectionString("RewindFix")
@@ -131,7 +132,8 @@ app.MapGet("/api/crashes/{id:guid}", async (
 app.MapGet("/api/crashes/{id:guid}/analysis", async (
     Guid id,
     RewindFixDbContext db,
-    SourceContextReader sourceReader) =>
+    SourceContextReader sourceReader,
+    RootCauseAnalyzer rootCauseAnalyzer) =>
 {
     var crash = await db.Crashes
         .AsNoTracking()
@@ -145,6 +147,10 @@ app.MapGet("/api/crashes/{id:guid}/analysis", async (
     var sourceContext = await sourceReader.ReadAsync(
         crash.SourceFilePath,
         crash.SourceLine);
+
+    var rootCause = rootCauseAnalyzer.Analyze(
+        crash.ExceptionType,
+        sourceContext);
 
     return Results.Ok(new
     {
@@ -164,7 +170,9 @@ app.MapGet("/api/crashes/{id:guid}/analysis", async (
             Method = crash.SourceMethod
         },
 
-        SourceContext = sourceContext
+        SourceContext = sourceContext,
+
+        RootCause = rootCause
     });
 });
 
