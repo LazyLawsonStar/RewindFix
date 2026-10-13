@@ -4,11 +4,11 @@ RewindFix is an open-source crash analysis and automated fix platform for .NET a
 
 The goal is simple:
 
-> Capture a production crash, locate the failing code, understand the root cause, generate a candidate fix, validate it, and prepare a pull request.
+> Capture a production crash, locate the failing code, understand the root cause, generate a candidate fix, validate it, publish a fix branch, and open a pull request for review.
 
 ## Current Status
 
-RewindFix is an early proof of concept, but the core end-to-end pipeline is already working.
+RewindFix is still an early proof of concept, but the core end-to-end pipeline is now working.
 
 Currently implemented:
 
@@ -23,15 +23,17 @@ Currently implemented:
 - Rule-based root-cause analysis
 - Suggested fix generation
 - Structured code patch generation
-- Safe patch preview generation
+- Safe patch preview returned as JSON without modifying the source tree
 - Temporary workspace validation
 - Automatic `dotnet build` validation
 - Existing test discovery and `dotnet test` validation
 - Git worktree creation
 - Generated fix branches and commits
-- Validated fix flow up to a pull request
+- Automatic branch push to GitHub
+- Automatic pull request creation through the GitHub API
+- Configurable automation levels: `Analyze`, `Patch`, `Validate`, and `Publish`
 
-## How It Works
+## End-to-End Flow
 
 ```text
 ASP.NET Core Application
@@ -66,10 +68,55 @@ RewindFix.Api
         |       |
         |       +--> dotnet test
         |
-        +--> Git branch + commit
+        +--> Git branch
+        |
+        +--> Commit
+        |
+        +--> Push to GitHub
         |
         v
    Pull Request
+```
+
+## Automation Levels
+
+RewindFix can be configured to stop at different stages of the pipeline.
+
+### `Analyze`
+
+Performs crash analysis only. Patch application, validation, and publication are blocked.
+
+### `Patch`
+
+Allows RewindFix to generate and return a patch preview. The preview is returned as structured JSON and does not create a `.rewindfix.cs` file beside the original source file.
+
+### `Validate`
+
+Allows patch generation plus isolated build and test validation. Git publication is blocked.
+
+### `Publish`
+
+Runs the full workflow:
+
+```text
+analysis
+→ patch
+→ build
+→ tests
+→ branch
+→ commit
+→ push
+→ pull request
+```
+
+The automation level can be configured in `appsettings.Development.json`:
+
+```json
+{
+  "RewindFix": {
+    "AutomationLevel": "Validate"
+  }
+}
 ```
 
 ## Example
@@ -88,7 +135,9 @@ RewindFix can capture the resulting `NullReferenceException`, locate the failing
 return customerName?.ToUpper() ?? string.Empty;
 ```
 
-The patch is applied in an isolated temporary workspace and validated with build and regression tests before it is considered ready for Git publication.
+Before publication, the generated patch is applied in an isolated temporary workspace and validated with build and regression tests.
+
+If the project is configured with `AutomationLevel = Publish`, RewindFix can then create a dedicated branch, commit the validated change, push the branch to GitHub, and open a pull request automatically.
 
 ## Project Structure
 
@@ -109,7 +158,7 @@ The SDK that is installed in an ASP.NET Core application. It captures unhandled 
 
 ### `RewindFix.Api`
 
-The backend that stores crashes, analyzes source locations, generates candidate fixes, validates patches, and coordinates the Git workflow.
+The backend that stores crashes, analyzes source locations, generates candidate fixes, validates patches, and coordinates Git and GitHub publication.
 
 ### `RewindFix.SampleApi`
 
@@ -119,11 +168,39 @@ A deliberately broken sample application used to exercise the full RewindFix pip
 
 Regression and integration tests used to verify that generated fixes actually improve application behavior instead of merely compiling.
 
+## GitHub Integration
+
+For local development, RewindFix uses a fine-grained GitHub personal access token to create pull requests.
+
+The token must not be committed to source control. Store it with .NET User Secrets:
+
+```bash
+dotnet user-secrets set "GitHub:Token" "YOUR_TOKEN" --project src/RewindFix.Api
+```
+
+Example development configuration:
+
+```json
+{
+  "RewindFix": {
+    "AutomationLevel": "Publish"
+  },
+  "GitHub": {
+    "Owner": "LazyLawsonStar",
+    "Repository": "RewindFix",
+    "BaseBranch": "main"
+  }
+}
+```
+
+For a production version, RewindFix should use GitHub App authentication rather than requiring users to create personal access tokens manually.
+
 ## Requirements
 
 - .NET 10 SDK
 - MySQL 8+
 - Git
+- GitHub credentials only when using `Publish`
 
 ## Build
 
@@ -163,7 +240,9 @@ RewindFix follows several safety rules:
 - Generated patches are never considered valid only because they compile.
 - Candidate fixes are validated in an isolated workspace.
 - Regression tests are used when available.
-- Production code should not be modified automatically without an explicit publication workflow.
+- Patch preview should not modify the monitored source tree.
+- Publication is controlled by an explicit automation level.
+- `Publish` creates a branch and pull request; it does not automatically merge into `main`.
 - Secrets and repository credentials must never be committed to source control.
 
 ## Roadmap
@@ -176,11 +255,16 @@ RewindFix follows several safety rules:
 - [x] Rule-based root-cause analysis
 - [x] Suggested fix generation
 - [x] Patch generation
+- [x] Safe patch preview
 - [x] Build validation in an isolated workspace
 - [x] Test validation
 - [x] Generate Git branches and commits
-- [ ] Native GitHub API integration inside RewindFix
-- [ ] Automatic pull request publication
+- [x] Push generated fix branches to GitHub
+- [x] Native GitHub API integration
+- [x] Automatic pull request publication
+- [x] Configurable automation levels
+- [ ] Prevent duplicate branches and pull requests for the same crash/fix
+- [ ] Automatic cleanup of temporary validation workspaces and Git worktrees
 - [ ] GitHub App authentication
 - [ ] Smarter source-code analysis
 - [ ] AI-assisted root-cause analysis
