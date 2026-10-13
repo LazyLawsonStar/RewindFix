@@ -2,8 +2,13 @@ using Microsoft.EntityFrameworkCore;
 using RewindFix.Api.Data;
 using RewindFix.Api.Entities;
 using RewindFix.Api.Analysis;
+using RewindFix.Api.Configuration;
+using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.Configure<RewindFixOptions>(
+    builder.Configuration.GetSection("RewindFix"));
 
 builder.Services.AddSingleton<StackTraceParser>();
 builder.Services.AddSingleton<SourceContextReader>();
@@ -13,6 +18,7 @@ builder.Services.AddSingleton<PatchGenerator>();
 builder.Services.AddSingleton<PatchApplier>();
 builder.Services.AddSingleton<PatchValidator>();
 builder.Services.AddSingleton<TestValidator>();
+builder.Services.AddSingleton<GitPatchPublisher>();
 
 var connectionString = builder.Configuration
     .GetConnectionString("RewindFix")
@@ -202,66 +208,14 @@ app.MapPost("/api/crashes/{id:guid}/apply-preview", async (
     RootCauseAnalyzer rootCauseAnalyzer,
     SuggestedFixGenerator fixGenerator,
     PatchGenerator patchGenerator,
-    PatchApplier patchApplier) =>
+    IOptions<RewindFixOptions> options) =>
 {
-    var crash = await db.Crashes
-        .AsNoTracking()
-        .FirstOrDefaultAsync(x => x.Id == id);
-
-    if (crash is null)
+    if (options.Value.AutomationLevel < AutomationLevel.Patch)
     {
-        return Results.NotFound();
+        return Results.StatusCode(
+            StatusCodes.Status403Forbidden);
     }
 
-    var sourceContext = await sourceReader.ReadAsync(
-        crash.SourceFilePath,
-        crash.SourceLine);
-
-    var rootCause = rootCauseAnalyzer.Analyze(
-        crash.ExceptionType,
-        sourceContext);
-
-    var suggestedFix = fixGenerator.Generate(
-        rootCause,
-        sourceContext);
-
-    var patch = patchGenerator.Generate(
-        sourceContext,
-        suggestedFix);
-
-    if (patch is null)
-    {
-        return Results.BadRequest(new
-        {
-            Error = "Unable to generate patch."
-        });
-    }
-
-    var result = await patchApplier.ApplyPreviewAsync(patch);
-
-    return result.Success
-        ? Results.Ok(new
-        {
-            Status = "preview_created",
-            result.OutputFilePath
-        })
-        : Results.BadRequest(new
-        {
-            Status = "failed",
-            result.Error
-        });
-});
-
-app.MapPost("/api/crashes/{id:guid}/validate-patch", async (
-    Guid id,
-    RewindFixDbContext db,
-    SourceContextReader sourceReader,
-    RootCauseAnalyzer rootCauseAnalyzer,
-    SuggestedFixGenerator fixGenerator,
-    PatchGenerator patchGenerator,
-    PatchValidator patchValidator,
-    TestValidator testValidator) =>
-{
     var crash = await db.Crashes
         .AsNoTracking()
         .FirstOrDefaultAsync(x => x.Id == id);
@@ -299,27 +253,195 @@ app.MapPost("/api/crashes/{id:guid}/validate-patch", async (
         });
     }
 
-    var validation =
+    return Results.Ok(new
+    {
+        Status = "preview_ready",
+        Patch = patch
+    });
+});
+
+app.MapPost("/api/crashes/{id:guid}/validate-patch", async (
+    Guid id,
+    RewindFixDbContext db,
+    SourceContextReader sourceReader,
+    RootCauseAnalyzer rootCauseAnalyzer,
+    SuggestedFixGenerator fixGenerator,
+    PatchGenerator patchGenerator,
+    PatchValidator patchValidator,
+    TestValidator testValidator,
+    IOptions<RewindFixOptions> options) =>
+{
+    if (options.Value.AutomationLevel < AutomationLevel.Validate)
+    {
+        return Results.StatusCode(
+            StatusCodes.Status403Forbidden);
+    }
+
+    var crash = await db.Crashes
+        .AsNoTracking()
+        .FirstOrDefaultAsync(x => x.Id == id);
+
+    if (crash is null)
+    {
+        return Results.NotFound();
+    }
+
+    var sourceContext =
+        await sourceReader.ReadAsync(
+            crash.SourceFilePath,
+            crash.SourceLine);
+
+    var rootCause =
+        rootCauseAnalyzer.Analyze(
+            crash.ExceptionType,
+            sourceContext);
+
+    var suggestedFix =
+        fixGenerator.Generate(
+            rootCause,
+            sourceContext);
+
+    var patch =
+        patchGenerator.Generate(
+            sourceContext,
+            suggestedFix);
+
+    if (patch is null)
+    {
+        return Results.BadRequest(new
+        {
+            Error = "Unable to generate patch."
+        });
+    }
+
+    var buildValidation =
         await patchValidator.ValidateAsync(patch);
 
     TestValidationResult? testValidation = null;
 
-    if (validation.Success &&
+    if (buildValidation.Success &&
         !string.IsNullOrWhiteSpace(
-            validation.WorkspacePath))
+            buildValidation.WorkspacePath))
     {
         testValidation =
             await testValidator.ValidateAsync(
-                validation.WorkspacePath);
+                buildValidation.WorkspacePath);
     }
 
     return Results.Ok(new
     {
         Patch = patch,
-        BuildValidation = validation,
+        BuildValidation = buildValidation,
         TestValidation = testValidation
     });
 });
+
+app.MapPost("/api/crashes/{id:guid}/prepare-git-fix", async (
+    Guid id,
+    RewindFixDbContext db,
+    SourceContextReader sourceReader,
+    RootCauseAnalyzer rootCauseAnalyzer,
+    SuggestedFixGenerator fixGenerator,
+    PatchGenerator patchGenerator,
+    PatchValidator patchValidator,
+    TestValidator testValidator,
+    GitPatchPublisher gitPatchPublisher,
+    IOptions<RewindFixOptions> options) =>
+{
+    if (options.Value.AutomationLevel < AutomationLevel.Publish)
+    {
+        return Results.StatusCode(
+            StatusCodes.Status403Forbidden);
+    }
+
+    var crash = await db.Crashes
+        .AsNoTracking()
+        .FirstOrDefaultAsync(x => x.Id == id);
+
+    if (crash is null)
+    {
+        return Results.NotFound();
+    }
+
+    var sourceContext =
+        await sourceReader.ReadAsync(
+            crash.SourceFilePath,
+            crash.SourceLine);
+
+    var rootCause =
+        rootCauseAnalyzer.Analyze(
+            crash.ExceptionType,
+            sourceContext);
+
+    var suggestedFix =
+        fixGenerator.Generate(
+            rootCause,
+            sourceContext);
+
+    var patch =
+        patchGenerator.Generate(
+            sourceContext,
+            suggestedFix);
+
+    if (patch is null)
+    {
+        return Results.BadRequest(new
+        {
+            Error = "Unable to generate patch."
+        });
+    }
+
+    var buildValidation =
+        await patchValidator.ValidateAsync(patch);
+
+    if (!buildValidation.Success ||
+        string.IsNullOrWhiteSpace(
+            buildValidation.WorkspacePath))
+    {
+        return Results.BadRequest(new
+        {
+            Error = "Generated patch did not pass build validation.",
+            BuildValidation = buildValidation
+        });
+    }
+
+    var testValidation =
+        await testValidator.ValidateAsync(
+            buildValidation.WorkspacePath);
+
+    if (!testValidation.Success)
+    {
+        return Results.BadRequest(new
+        {
+            Error = "Generated patch did not pass tests.",
+            BuildValidation = buildValidation,
+            TestValidation = testValidation
+        });
+    }
+
+    var gitResult =
+        await gitPatchPublisher.PrepareAsync(patch);
+
+    if (!gitResult.Success)
+    {
+        return Results.BadRequest(new
+        {
+            Error = "Unable to prepare Git fix.",
+            BuildValidation = buildValidation,
+            TestValidation = testValidation,
+            Git = gitResult
+        });
+    }
+
+    return Results.Ok(new
+    {
+        Patch = patch,
+        BuildValidation = buildValidation,
+        TestValidation = testValidation,
+        Git = gitResult
+    });
+});
+
 
 app.Run();
 
