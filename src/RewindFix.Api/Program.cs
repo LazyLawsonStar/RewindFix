@@ -1,4 +1,20 @@
+using Microsoft.EntityFrameworkCore;
+using RewindFix.Api.Data;
+using RewindFix.Api.Entities;
+
 var builder = WebApplication.CreateBuilder(args);
+
+var connectionString = builder.Configuration
+    .GetConnectionString("RewindFix")
+    ?? throw new InvalidOperationException(
+        "Connection string 'RewindFix' was not found.");
+
+builder.Services.AddDbContext<RewindFixDbContext>(options =>
+{
+    options.UseMySql(
+        connectionString,
+        ServerVersion.AutoDetect(connectionString));
+});
 
 builder.Services.AddOpenApi();
 
@@ -9,31 +25,95 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-app.MapPost("/api/crashes", (CrashReportRequest crash) =>
+app.MapPost("/api/crashes", async (
+    CrashReportRequest report,
+    RewindFixDbContext db) =>
 {
+    var exists = await db.Crashes
+        .AnyAsync(x => x.Id == report.CrashId);
+
+    if (exists)
+    {
+        return Results.Ok(new
+        {
+            CrashId = report.CrashId,
+            Status = "already_received"
+        });
+    }
+
+    var crash = new Crash
+    {
+        Id = report.CrashId,
+        Timestamp = report.Timestamp,
+
+        HttpMethod = report.Request.Method,
+        Path = report.Request.Path,
+        QueryString = report.Request.QueryString,
+
+        ExceptionType = report.Exception.Type,
+        ExceptionMessage = report.Exception.Message,
+        StackTrace = report.Exception.StackTrace,
+
+        TraceId = report.TraceId,
+        ReceivedAt = DateTimeOffset.UtcNow
+    };
+
+    db.Crashes.Add(crash);
+
+    await db.SaveChangesAsync();
+
     Console.WriteLine();
     Console.WriteLine("==========================================");
-    Console.WriteLine("        REWINDFIX CRASH RECEIVED");
+    Console.WriteLine("        REWINDFIX CRASH STORED");
     Console.WriteLine("==========================================");
-    Console.WriteLine($"Crash ID:  {crash.CrashId}");
-    Console.WriteLine($"Time:      {crash.Timestamp}");
-    Console.WriteLine($"Request:   {crash.Request.Method} {crash.Request.Path}");
-    Console.WriteLine($"Exception: {crash.Exception.Type}");
-    Console.WriteLine($"Message:   {crash.Exception.Message}");
-    Console.WriteLine($"Trace ID:  {crash.TraceId}");
-    Console.WriteLine();
-    Console.WriteLine("Stack trace:");
-    Console.WriteLine(crash.Exception.StackTrace);
+    Console.WriteLine($"Crash ID:  {crash.Id}");
+    Console.WriteLine($"Request:   {crash.HttpMethod} {crash.Path}");
+    Console.WriteLine($"Exception: {crash.ExceptionType}");
+    Console.WriteLine($"Message:   {crash.ExceptionMessage}");
     Console.WriteLine("==========================================");
     Console.WriteLine();
 
-    return Results.Accepted(
-        $"/api/crashes/{crash.CrashId}",
+    return Results.Created(
+        $"/api/crashes/{crash.Id}",
         new
         {
-            crash.CrashId,
-            Status = "received"
+            CrashId = crash.Id,
+            Status = "stored"
         });
+});
+
+app.MapGet("/api/crashes", async (
+    RewindFixDbContext db) =>
+{
+    var crashes = await db.Crashes
+        .AsNoTracking()
+        .OrderByDescending(x => x.ReceivedAt)
+        .Select(x => new
+        {
+            CrashId = x.Id,
+            x.Timestamp,
+            Method = x.HttpMethod,
+            x.Path,
+            Exception = x.ExceptionType,
+            Message = x.ExceptionMessage,
+            x.ReceivedAt
+        })
+        .ToListAsync();
+
+    return Results.Ok(crashes);
+});
+
+app.MapGet("/api/crashes/{id:guid}", async (
+    Guid id,
+    RewindFixDbContext db) =>
+{
+    var crash = await db.Crashes
+        .AsNoTracking()
+        .FirstOrDefaultAsync(x => x.Id == id);
+
+    return crash is null
+        ? Results.NotFound()
+        : Results.Ok(crash);
 });
 
 app.Run();
