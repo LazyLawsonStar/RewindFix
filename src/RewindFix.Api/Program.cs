@@ -9,6 +9,9 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<RewindFixOptions>(
     builder.Configuration.GetSection("RewindFix"));
+builder.Services.Configure<GitHubOptions>(
+    builder.Configuration.GetSection("GitHub"));
+
 
 builder.Services.AddSingleton<StackTraceParser>();
 builder.Services.AddSingleton<SourceContextReader>();
@@ -19,6 +22,7 @@ builder.Services.AddSingleton<PatchApplier>();
 builder.Services.AddSingleton<PatchValidator>();
 builder.Services.AddSingleton<TestValidator>();
 builder.Services.AddSingleton<GitPatchPublisher>();
+builder.Services.AddHttpClient<GitHubPullRequestPublisher>();
 
 var connectionString = builder.Configuration
     .GetConnectionString("RewindFix")
@@ -346,6 +350,7 @@ app.MapPost("/api/crashes/{id:guid}/prepare-git-fix", async (
     PatchValidator patchValidator,
     TestValidator testValidator,
     GitPatchPublisher gitPatchPublisher,
+    GitHubPullRequestPublisher pullRequestPublisher,
     IOptions<RewindFixOptions> options) =>
 {
     if (options.Value.AutomationLevel < AutomationLevel.Publish)
@@ -433,12 +438,30 @@ app.MapPost("/api/crashes/{id:guid}/prepare-git-fix", async (
         });
     }
 
+    var pullRequest =
+        await pullRequestPublisher.CreateAsync(
+            gitResult.BranchName!,
+            patch);
+
+    if (!pullRequest.Success)
+    {
+        return Results.BadRequest(new
+        {
+            Error = "Branch was pushed, but Pull Request creation failed.",
+            BuildValidation = buildValidation,
+            TestValidation = testValidation,
+            Git = gitResult,
+            PullRequest = pullRequest
+        });
+    }
+
     return Results.Ok(new
     {
         Patch = patch,
         BuildValidation = buildValidation,
         TestValidation = testValidation,
-        Git = gitResult
+        Git = gitResult,
+        PullRequest = pullRequest
     });
 });
 
