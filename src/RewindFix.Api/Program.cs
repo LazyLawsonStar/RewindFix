@@ -9,6 +9,9 @@ builder.Services.AddSingleton<StackTraceParser>();
 builder.Services.AddSingleton<SourceContextReader>();
 builder.Services.AddSingleton<RootCauseAnalyzer>();
 builder.Services.AddSingleton<SuggestedFixGenerator>();
+builder.Services.AddSingleton<PatchGenerator>();
+builder.Services.AddSingleton<PatchApplier>();
+builder.Services.AddSingleton<PatchValidator>();
 
 var connectionString = builder.Configuration
     .GetConnectionString("RewindFix")
@@ -135,7 +138,8 @@ app.MapGet("/api/crashes/{id:guid}/analysis", async (
     RewindFixDbContext db,
     SourceContextReader sourceReader,
     RootCauseAnalyzer rootCauseAnalyzer,
-    SuggestedFixGenerator fixGenerator) =>
+    SuggestedFixGenerator fixGenerator,
+    PatchGenerator patchGenerator) =>
 {
     var crash = await db.Crashes
         .AsNoTracking()
@@ -157,6 +161,10 @@ app.MapGet("/api/crashes/{id:guid}/analysis", async (
     var suggestedFix = fixGenerator.Generate(
         rootCause,
         sourceContext);
+
+    var patch = patchGenerator.Generate(
+        sourceContext,
+        suggestedFix);
 
     return Results.Ok(new
     {
@@ -180,7 +188,122 @@ app.MapGet("/api/crashes/{id:guid}/analysis", async (
 
         RootCause = rootCause,
 
-        SuggestedFix = suggestedFix
+        SuggestedFix = suggestedFix,
+
+        Patch = patch
+    });
+});
+
+app.MapPost("/api/crashes/{id:guid}/apply-preview", async (
+    Guid id,
+    RewindFixDbContext db,
+    SourceContextReader sourceReader,
+    RootCauseAnalyzer rootCauseAnalyzer,
+    SuggestedFixGenerator fixGenerator,
+    PatchGenerator patchGenerator,
+    PatchApplier patchApplier) =>
+{
+    var crash = await db.Crashes
+        .AsNoTracking()
+        .FirstOrDefaultAsync(x => x.Id == id);
+
+    if (crash is null)
+    {
+        return Results.NotFound();
+    }
+
+    var sourceContext = await sourceReader.ReadAsync(
+        crash.SourceFilePath,
+        crash.SourceLine);
+
+    var rootCause = rootCauseAnalyzer.Analyze(
+        crash.ExceptionType,
+        sourceContext);
+
+    var suggestedFix = fixGenerator.Generate(
+        rootCause,
+        sourceContext);
+
+    var patch = patchGenerator.Generate(
+        sourceContext,
+        suggestedFix);
+
+    if (patch is null)
+    {
+        return Results.BadRequest(new
+        {
+            Error = "Unable to generate patch."
+        });
+    }
+
+    var result = await patchApplier.ApplyPreviewAsync(patch);
+
+    return result.Success
+        ? Results.Ok(new
+        {
+            Status = "preview_created",
+            result.OutputFilePath
+        })
+        : Results.BadRequest(new
+        {
+            Status = "failed",
+            result.Error
+        });
+});
+
+app.MapPost("/api/crashes/{id:guid}/validate-patch", async (
+    Guid id,
+    RewindFixDbContext db,
+    SourceContextReader sourceReader,
+    RootCauseAnalyzer rootCauseAnalyzer,
+    SuggestedFixGenerator fixGenerator,
+    PatchGenerator patchGenerator,
+    PatchValidator patchValidator) =>
+{
+    var crash = await db.Crashes
+        .AsNoTracking()
+        .FirstOrDefaultAsync(x => x.Id == id);
+
+    if (crash is null)
+    {
+        return Results.NotFound();
+    }
+
+    var sourceContext =
+        await sourceReader.ReadAsync(
+            crash.SourceFilePath,
+            crash.SourceLine);
+
+    var rootCause =
+        rootCauseAnalyzer.Analyze(
+            crash.ExceptionType,
+            sourceContext);
+
+    var suggestedFix =
+        fixGenerator.Generate(
+            rootCause,
+            sourceContext);
+
+    var patch =
+        patchGenerator.Generate(
+            sourceContext,
+            suggestedFix);
+
+    if (patch is null)
+    {
+        return Results.BadRequest(new
+        {
+            Error = "Unable to generate patch."
+        });
+    }
+
+    var validation =
+        await patchValidator.ValidateAsync(patch);
+
+    return Results.Ok(new
+    {
+        Patch = patch,
+        Validation = validation
     });
 });
 
