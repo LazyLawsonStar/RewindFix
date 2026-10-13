@@ -18,6 +18,14 @@ public sealed class Crash
 
     public string? StackTrace { get; set; }
 
+    public string? SourceFilePath { get; set; }
+
+    public string? SourceFileName { get; set; }
+
+    public int? SourceLine { get; set; }
+
+    public string? SourceMethod { get; set; }
+
     public required string TraceId { get; set; }
 
     public DateTimeOffset ReceivedAt { get; set; }

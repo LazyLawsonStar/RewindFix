@@ -1,8 +1,12 @@
 using Microsoft.EntityFrameworkCore;
 using RewindFix.Api.Data;
 using RewindFix.Api.Entities;
+using RewindFix.Api.Analysis;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddSingleton<StackTraceParser>();
+builder.Services.AddSingleton<SourceContextReader>();
 
 var connectionString = builder.Configuration
     .GetConnectionString("RewindFix")
@@ -27,7 +31,8 @@ if (app.Environment.IsDevelopment())
 
 app.MapPost("/api/crashes", async (
     CrashReportRequest report,
-    RewindFixDbContext db) =>
+    RewindFixDbContext db,
+    StackTraceParser parser) =>
 {
     var exists = await db.Crashes
         .AnyAsync(x => x.Id == report.CrashId);
@@ -41,6 +46,8 @@ app.MapPost("/api/crashes", async (
         });
     }
 
+    var sourceLocation = parser.Parse(report.Exception.StackTrace);
+
     var crash = new Crash
     {
         Id = report.CrashId,
@@ -53,6 +60,11 @@ app.MapPost("/api/crashes", async (
         ExceptionType = report.Exception.Type,
         ExceptionMessage = report.Exception.Message,
         StackTrace = report.Exception.StackTrace,
+
+        SourceFilePath = sourceLocation?.FilePath,
+        SourceFileName = sourceLocation?.FileName,
+        SourceLine = sourceLocation?.Line,
+        SourceMethod = sourceLocation?.Method,
 
         TraceId = report.TraceId,
         ReceivedAt = DateTimeOffset.UtcNow
@@ -114,6 +126,46 @@ app.MapGet("/api/crashes/{id:guid}", async (
     return crash is null
         ? Results.NotFound()
         : Results.Ok(crash);
+});
+
+app.MapGet("/api/crashes/{id:guid}/analysis", async (
+    Guid id,
+    RewindFixDbContext db,
+    SourceContextReader sourceReader) =>
+{
+    var crash = await db.Crashes
+        .AsNoTracking()
+        .FirstOrDefaultAsync(x => x.Id == id);
+
+    if (crash is null)
+    {
+        return Results.NotFound();
+    }
+
+    var sourceContext = await sourceReader.ReadAsync(
+        crash.SourceFilePath,
+        crash.SourceLine);
+
+    return Results.Ok(new
+    {
+        CrashId = crash.Id,
+
+        Exception = new
+        {
+            Type = crash.ExceptionType,
+            Message = crash.ExceptionMessage
+        },
+
+        SourceLocation = new
+        {
+            FilePath = crash.SourceFilePath,
+            FileName = crash.SourceFileName,
+            Line = crash.SourceLine,
+            Method = crash.SourceMethod
+        },
+
+        SourceContext = sourceContext
+    });
 });
 
 app.Run();

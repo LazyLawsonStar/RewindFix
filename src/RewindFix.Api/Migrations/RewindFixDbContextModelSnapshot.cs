@@ -53,6 +53,21 @@ namespace RewindFix.Api.Migrations
                     b.Property<DateTimeOffset>("ReceivedAt")
                         .HasColumnType("datetime(6)");
 
+                    b.Property<string>("SourceFileName")
+                        .HasMaxLength(512)
+                        .HasColumnType("varchar(512)");
+
+                    b.Property<string>("SourceFilePath")
+                        .HasMaxLength(4096)
+                        .HasColumnType("varchar(4096)");
+
+                    b.Property<int?>("SourceLine")
+                        .HasColumnType("int");
+
+                    b.Property<string>("SourceMethod")
+                        .HasMaxLength(2048)
+                        .HasColumnType("varchar(2048)");
+
                     b.Property<string>("StackTrace")
                         .HasColumnType("longtext");
 

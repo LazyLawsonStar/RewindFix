@@ -36,5 +36,14 @@ public sealed class RewindFixDbContext : DbContext
 
         crash.Property(x => x.StackTrace)
             .HasColumnType("longtext");
+
+        crash.Property(x => x.SourceFilePath)
+            .HasMaxLength(4096);
+
+        crash.Property(x => x.SourceFileName)
+            .HasMaxLength(512);
+
+        crash.Property(x => x.SourceMethod)
+            .HasMaxLength(2048);
     }
 }
