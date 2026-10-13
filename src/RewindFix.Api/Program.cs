@@ -12,6 +12,7 @@ builder.Services.AddSingleton<SuggestedFixGenerator>();
 builder.Services.AddSingleton<PatchGenerator>();
 builder.Services.AddSingleton<PatchApplier>();
 builder.Services.AddSingleton<PatchValidator>();
+builder.Services.AddSingleton<TestValidator>();
 
 var connectionString = builder.Configuration
     .GetConnectionString("RewindFix")
@@ -258,7 +259,8 @@ app.MapPost("/api/crashes/{id:guid}/validate-patch", async (
     RootCauseAnalyzer rootCauseAnalyzer,
     SuggestedFixGenerator fixGenerator,
     PatchGenerator patchGenerator,
-    PatchValidator patchValidator) =>
+    PatchValidator patchValidator,
+    TestValidator testValidator) =>
 {
     var crash = await db.Crashes
         .AsNoTracking()
@@ -300,10 +302,22 @@ app.MapPost("/api/crashes/{id:guid}/validate-patch", async (
     var validation =
         await patchValidator.ValidateAsync(patch);
 
+    TestValidationResult? testValidation = null;
+
+    if (validation.Success &&
+        !string.IsNullOrWhiteSpace(
+            validation.WorkspacePath))
+    {
+        testValidation =
+            await testValidator.ValidateAsync(
+                validation.WorkspacePath);
+    }
+
     return Results.Ok(new
     {
         Patch = patch,
-        Validation = validation
+        BuildValidation = validation,
+        TestValidation = testValidation
     });
 });
 
