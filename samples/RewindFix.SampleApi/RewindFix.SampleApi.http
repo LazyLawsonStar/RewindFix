@@ -1,0 +1,6 @@
+@RewindFix.SampleApi_HostAddress = http://localhost:5163
+
+GET {{RewindFix.SampleApi_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
