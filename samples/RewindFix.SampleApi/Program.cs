@@ -48,6 +48,8 @@ app.MapGet("/weatherforecast", () =>
 })
 .WithName("GetWeatherForecast");
 
+
+
 // Специально сломанный endpoint для проверки RewindFix.
 app.MapGet("/api/crash", () =>
 {
@@ -65,4 +67,8 @@ record WeatherForecast(
 {
     public int TemperatureF =>
         32 + (int)(TemperatureC / 0.5556);
+}
+
+public partial class Program
+{
 }

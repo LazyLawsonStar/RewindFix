@@ -21,31 +21,36 @@ public sealed class SuggestedFixGenerator
         {
             var variableName = rootCause.VariableName;
 
-            return new SuggestedFix
+            var targetLine = sourceContext.Lines
+                .FirstOrDefault(x => x.IsTarget);
+
+            if (targetLine is not null &&
+                targetLine.Code.Contains(
+                    $"{variableName}!.ToUpper()",
+                    StringComparison.Ordinal))
             {
-                Summary =
-                    $"Add null handling for '{variableName}' before it is dereferenced.",
+                return new SuggestedFix
+                {
+                    Summary =
+                        $"Make the ToUpper call null-safe for '{variableName}'.",
 
-                Confidence = "high",
+                    Confidence = "high",
 
-                ReplacementCode =
-                    $"if ({variableName} is null)\n" +
-                    "{\n" +
-                    "    throw new InvalidOperationException(\n" +
-                    $"        \"{variableName} must not be null.\");\n" +
-                    "}\n\n" +
-                    $"return {variableName}.ToUpper();",
+                    ReplacementCode =
+                        $"return {variableName}?.ToUpper() ?? string.Empty;",
 
-                Notes =
-                    "This is a rule-based suggestion. The exact production fix may depend on business requirements."
-            };
+                    Notes =
+                        "This rule prevents the NullReferenceException and preserves a string return value. Business-specific behavior may require a different fallback."
+                };
+            }
         }
 
         return new SuggestedFix
         {
             Summary = "No reliable automatic fix could be generated.",
             Confidence = "low",
-            Notes = "Manual review or deeper analysis is required."
+            Notes =
+                "RewindFix does not have a safe rule for this code pattern yet."
         };
     }
 }

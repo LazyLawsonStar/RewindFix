@@ -6,4 +6,7 @@
     <Project Path="src/RewindFix.Api/RewindFix.Api.csproj" />
     <Project Path="src/RewindFix.AspNetCore/RewindFix.AspNetCore.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/RewindFix.SampleApi.Tests/RewindFix.SampleApi.Tests.csproj" />
+  </Folder>
 </Solution>
