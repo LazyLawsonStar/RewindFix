@@ -281,4 +281,6 @@ RewindFix is experimental and is not ready for production use yet. Generated fix
 
 ## License
 
-A license has not been selected yet.
+This project is licensed under the [MIT License](LICENSE).
+
+SPDX-License-Identifier: MIT
