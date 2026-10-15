@@ -10,4 +10,6 @@ public sealed class RewindFixOptions
 
     public int QueueCapacity { get; set; }
         = 1000;
+
+    public string? ApiKey { get; set; }
 }

@@ -1,17 +1,23 @@
 using Microsoft.EntityFrameworkCore;
-using RewindFix.Api.Data;
-using RewindFix.Api.Entities;
+using Microsoft.Extensions.Options;
 using RewindFix.Api.Analysis;
 using RewindFix.Api.Configuration;
-using Microsoft.Extensions.Options;
+using RewindFix.Api.Data;
+using RewindFix.Api.Entities;
+using RewindFix.Api.Security;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<RewindFixOptions>(
     builder.Configuration.GetSection("RewindFix"));
+
 builder.Services.Configure<GitHubOptions>(
     builder.Configuration.GetSection("GitHub"));
 
+builder.Services.Configure<ApiKeyOptions>(
+    builder.Configuration.GetSection("ApiKeys"));
+
+builder.Services.AddSingleton<ApiKeyValidator>();
 
 builder.Services.AddSingleton<StackTraceParser>();
 builder.Services.AddSingleton<SourceContextReader>();
@@ -22,6 +28,7 @@ builder.Services.AddSingleton<PatchApplier>();
 builder.Services.AddSingleton<PatchValidator>();
 builder.Services.AddSingleton<TestValidator>();
 builder.Services.AddSingleton<GitPatchPublisher>();
+
 builder.Services.AddHttpClient<GitHubPullRequestPublisher>();
 
 var connectionString = builder.Configuration
@@ -45,6 +52,13 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
+
+// ============================================================
+// INGEST
+// SDK may submit crashes with the Ingest key.
+// Admin key is also accepted by IngestApiKeyFilter.
+// ============================================================
+
 app.MapPost("/api/crashes", async (
     CrashReportRequest report,
     RewindFixDbContext db,
@@ -62,7 +76,8 @@ app.MapPost("/api/crashes", async (
         });
     }
 
-    var sourceLocation = parser.Parse(report.Exception.StackTrace);
+    var sourceLocation =
+        parser.Parse(report.Exception.StackTrace);
 
     var crash = new Crash
     {
@@ -91,14 +106,19 @@ app.MapPost("/api/crashes", async (
     await db.SaveChangesAsync();
 
     Console.WriteLine();
-    Console.WriteLine("==========================================");
-    Console.WriteLine("        REWINDFIX CRASH STORED");
-    Console.WriteLine("==========================================");
+    Console.WriteLine(
+        "==========================================");
+    Console.WriteLine(
+        "        REWINDFIX CRASH STORED");
+    Console.WriteLine(
+        "==========================================");
     Console.WriteLine($"Crash ID:  {crash.Id}");
-    Console.WriteLine($"Request:   {crash.HttpMethod} {crash.Path}");
-    Console.WriteLine($"Exception: {crash.ExceptionType}");
-    Console.WriteLine($"Message:   {crash.ExceptionMessage}");
-    Console.WriteLine("==========================================");
+    Console.WriteLine(
+        $"Request:   {crash.HttpMethod} {crash.Path}");
+    Console.WriteLine(
+        $"Exception: {crash.ExceptionType}");
+    Console.WriteLine(
+        "==========================================");
     Console.WriteLine();
 
     return Results.Created(
@@ -108,7 +128,14 @@ app.MapPost("/api/crashes", async (
             CrashId = crash.Id,
             Status = "stored"
         });
-});
+})
+.AddEndpointFilter<IngestApiKeyFilter>();
+
+
+// ============================================================
+// CRASH LIST
+// Admin only.
+// ============================================================
 
 app.MapGet("/api/crashes", async (
     RewindFixDbContext db) =>
@@ -129,7 +156,14 @@ app.MapGet("/api/crashes", async (
         .ToListAsync();
 
     return Results.Ok(crashes);
-});
+})
+.AddEndpointFilter<AdminApiKeyFilter>();
+
+
+// ============================================================
+// SINGLE CRASH
+// Admin only.
+// ============================================================
 
 app.MapGet("/api/crashes/{id:guid}", async (
     Guid id,
@@ -142,15 +176,24 @@ app.MapGet("/api/crashes/{id:guid}", async (
     return crash is null
         ? Results.NotFound()
         : Results.Ok(crash);
-});
+})
+.AddEndpointFilter<AdminApiKeyFilter>();
 
-app.MapGet("/api/crashes/{id:guid}/analysis", async (
-    Guid id,
-    RewindFixDbContext db,
-    SourceContextReader sourceReader,
-    RootCauseAnalyzer rootCauseAnalyzer,
-    SuggestedFixGenerator fixGenerator,
-    PatchGenerator patchGenerator) =>
+
+// ============================================================
+// ANALYSIS
+// Admin only.
+// ============================================================
+
+app.MapGet(
+    "/api/crashes/{id:guid}/analysis",
+    async (
+        Guid id,
+        RewindFixDbContext db,
+        SourceContextReader sourceReader,
+        RootCauseAnalyzer rootCauseAnalyzer,
+        SuggestedFixGenerator fixGenerator,
+        PatchGenerator patchGenerator) =>
 {
     var crash = await db.Crashes
         .AsNoTracking()
@@ -161,21 +204,25 @@ app.MapGet("/api/crashes/{id:guid}/analysis", async (
         return Results.NotFound();
     }
 
-    var sourceContext = await sourceReader.ReadAsync(
-        crash.SourceFilePath,
-        crash.SourceLine);
+    var sourceContext =
+        await sourceReader.ReadAsync(
+            crash.SourceFilePath,
+            crash.SourceLine);
 
-    var rootCause = rootCauseAnalyzer.Analyze(
-        crash.ExceptionType,
-        sourceContext);
+    var rootCause =
+        rootCauseAnalyzer.Analyze(
+            crash.ExceptionType,
+            sourceContext);
 
-    var suggestedFix = fixGenerator.Generate(
-        rootCause,
-        sourceContext);
+    var suggestedFix =
+        fixGenerator.Generate(
+            rootCause,
+            sourceContext);
 
-    var patch = patchGenerator.Generate(
-        sourceContext,
-        suggestedFix);
+    var patch =
+        patchGenerator.Generate(
+            sourceContext,
+            suggestedFix);
 
     return Results.Ok(new
     {
@@ -196,25 +243,32 @@ app.MapGet("/api/crashes/{id:guid}/analysis", async (
         },
 
         SourceContext = sourceContext,
-
         RootCause = rootCause,
-
         SuggestedFix = suggestedFix,
-
         Patch = patch
     });
-});
+})
+.AddEndpointFilter<AdminApiKeyFilter>();
 
-app.MapPost("/api/crashes/{id:guid}/apply-preview", async (
-    Guid id,
-    RewindFixDbContext db,
-    SourceContextReader sourceReader,
-    RootCauseAnalyzer rootCauseAnalyzer,
-    SuggestedFixGenerator fixGenerator,
-    PatchGenerator patchGenerator,
-    IOptions<RewindFixOptions> options) =>
+
+// ============================================================
+// PATCH PREVIEW
+// Admin only.
+// ============================================================
+
+app.MapPost(
+    "/api/crashes/{id:guid}/apply-preview",
+    async (
+        Guid id,
+        RewindFixDbContext db,
+        SourceContextReader sourceReader,
+        RootCauseAnalyzer rootCauseAnalyzer,
+        SuggestedFixGenerator fixGenerator,
+        PatchGenerator patchGenerator,
+        IOptions<RewindFixOptions> options) =>
 {
-    if (options.Value.AutomationLevel < AutomationLevel.Patch)
+    if (options.Value.AutomationLevel <
+        AutomationLevel.Patch)
     {
         return Results.StatusCode(
             StatusCodes.Status403Forbidden);
@@ -262,20 +316,30 @@ app.MapPost("/api/crashes/{id:guid}/apply-preview", async (
         Status = "preview_ready",
         Patch = patch
     });
-});
+})
+.AddEndpointFilter<AdminApiKeyFilter>();
 
-app.MapPost("/api/crashes/{id:guid}/validate-patch", async (
-    Guid id,
-    RewindFixDbContext db,
-    SourceContextReader sourceReader,
-    RootCauseAnalyzer rootCauseAnalyzer,
-    SuggestedFixGenerator fixGenerator,
-    PatchGenerator patchGenerator,
-    PatchValidator patchValidator,
-    TestValidator testValidator,
-    IOptions<RewindFixOptions> options) =>
+
+// ============================================================
+// VALIDATE PATCH
+// Admin only.
+// ============================================================
+
+app.MapPost(
+    "/api/crashes/{id:guid}/validate-patch",
+    async (
+        Guid id,
+        RewindFixDbContext db,
+        SourceContextReader sourceReader,
+        RootCauseAnalyzer rootCauseAnalyzer,
+        SuggestedFixGenerator fixGenerator,
+        PatchGenerator patchGenerator,
+        PatchValidator patchValidator,
+        TestValidator testValidator,
+        IOptions<RewindFixOptions> options) =>
 {
-    if (options.Value.AutomationLevel < AutomationLevel.Validate)
+    if (options.Value.AutomationLevel <
+        AutomationLevel.Validate)
     {
         return Results.StatusCode(
             StatusCodes.Status403Forbidden);
@@ -338,22 +402,32 @@ app.MapPost("/api/crashes/{id:guid}/validate-patch", async (
         BuildValidation = buildValidation,
         TestValidation = testValidation
     });
-});
+})
+.AddEndpointFilter<AdminApiKeyFilter>();
 
-app.MapPost("/api/crashes/{id:guid}/prepare-git-fix", async (
-    Guid id,
-    RewindFixDbContext db,
-    SourceContextReader sourceReader,
-    RootCauseAnalyzer rootCauseAnalyzer,
-    SuggestedFixGenerator fixGenerator,
-    PatchGenerator patchGenerator,
-    PatchValidator patchValidator,
-    TestValidator testValidator,
-    GitPatchPublisher gitPatchPublisher,
-    GitHubPullRequestPublisher pullRequestPublisher,
-    IOptions<RewindFixOptions> options) =>
+
+// ============================================================
+// GIT + PULL REQUEST
+// Admin only.
+// ============================================================
+
+app.MapPost(
+    "/api/crashes/{id:guid}/prepare-git-fix",
+    async (
+        Guid id,
+        RewindFixDbContext db,
+        SourceContextReader sourceReader,
+        RootCauseAnalyzer rootCauseAnalyzer,
+        SuggestedFixGenerator fixGenerator,
+        PatchGenerator patchGenerator,
+        PatchValidator patchValidator,
+        TestValidator testValidator,
+        GitPatchPublisher gitPatchPublisher,
+        GitHubPullRequestPublisher pullRequestPublisher,
+        IOptions<RewindFixOptions> options) =>
 {
-    if (options.Value.AutomationLevel < AutomationLevel.Publish)
+    if (options.Value.AutomationLevel <
+        AutomationLevel.Publish)
     {
         return Results.StatusCode(
             StatusCodes.Status403Forbidden);
@@ -405,7 +479,8 @@ app.MapPost("/api/crashes/{id:guid}/prepare-git-fix", async (
     {
         return Results.BadRequest(new
         {
-            Error = "Generated patch did not pass build validation.",
+            Error =
+                "Generated patch did not pass build validation.",
             BuildValidation = buildValidation
         });
     }
@@ -418,7 +493,8 @@ app.MapPost("/api/crashes/{id:guid}/prepare-git-fix", async (
     {
         return Results.BadRequest(new
         {
-            Error = "Generated patch did not pass tests.",
+            Error =
+                "Generated patch did not pass tests.",
             BuildValidation = buildValidation,
             TestValidation = testValidation
         });
@@ -447,7 +523,8 @@ app.MapPost("/api/crashes/{id:guid}/prepare-git-fix", async (
     {
         return Results.BadRequest(new
         {
-            Error = "Branch was pushed, but Pull Request creation failed.",
+            Error =
+                "Branch was pushed, but Pull Request creation failed.",
             BuildValidation = buildValidation,
             TestValidation = testValidation,
             Git = gitResult,
@@ -463,10 +540,12 @@ app.MapPost("/api/crashes/{id:guid}/prepare-git-fix", async (
         Git = gitResult,
         PullRequest = pullRequest
     });
-});
+})
+.AddEndpointFilter<AdminApiKeyFilter>();
 
 
 app.Run();
+
 
 public sealed record CrashReportRequest
 {
@@ -481,6 +560,7 @@ public sealed record CrashReportRequest
     public required string TraceId { get; init; }
 }
 
+
 public sealed record CrashRequestData
 {
     public required string Method { get; init; }
@@ -489,6 +569,7 @@ public sealed record CrashRequestData
 
     public string? QueryString { get; init; }
 }
+
 
 public sealed record CrashExceptionData
 {

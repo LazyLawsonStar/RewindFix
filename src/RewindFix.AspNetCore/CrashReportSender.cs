@@ -57,11 +57,23 @@ internal sealed class CrashReportSender
                     _options.ServerUrl.TrimEnd('/') + "/"),
                 "api/crashes");
 
-            var response =
-                await client.PostAsJsonAsync(
-                    endpoint,
-                    report,
-                    timeout.Token);
+            using var request = new HttpRequestMessage(
+                HttpMethod.Post,
+                endpoint);
+
+            request.Content =
+                JsonContent.Create(report);
+
+            if (!string.IsNullOrWhiteSpace(_options.ApiKey))
+            {
+                request.Headers.Add(
+                    "X-RewindFix-Key",
+                    _options.ApiKey);
+            }
+
+            var response = await client.SendAsync(
+                request,
+                timeout.Token);
 
             if (response.IsSuccessStatusCode)
             {
