@@ -1,7 +1,23 @@
+using Microsoft.Extensions.Options;
+using RewindFix.Api.Configuration;
+
 namespace RewindFix.Api.Analysis;
 
 public sealed class SourceContextReader
 {
+    private readonly string? _repositoryRoot;
+
+    public SourceContextReader(
+        IOptions<RewindFixOptions> options)
+    {
+        var configuredRoot = options.Value.RepositoryRoot;
+
+        if (!string.IsNullOrWhiteSpace(configuredRoot))
+        {
+            _repositoryRoot = Path.GetFullPath(configuredRoot);
+        }
+    }
+
     public async Task<SourceContext?> ReadAsync(
         string? filePath,
         int? lineNumber,
@@ -17,12 +33,33 @@ public sealed class SourceContextReader
             return null;
         }
 
-        if (!File.Exists(filePath))
+        if (string.IsNullOrWhiteSpace(_repositoryRoot))
         {
             return null;
         }
 
-        var lines = await File.ReadAllLinesAsync(filePath);
+        string fullPath;
+
+        try
+        {
+            fullPath = Path.GetFullPath(filePath);
+        }
+        catch
+        {
+            return null;
+        }
+
+        if (!IsInsideRepository(fullPath))
+        {
+            return null;
+        }
+
+        if (!File.Exists(fullPath))
+        {
+            return null;
+        }
+
+        var lines = await File.ReadAllLinesAsync(fullPath);
 
         if (lineNumber > lines.Length)
         {
@@ -31,12 +68,16 @@ public sealed class SourceContextReader
 
         var targetIndex = lineNumber.Value - 1;
 
-        var startIndex = Math.Max(0, targetIndex - radius);
+        var startIndex = Math.Max(
+            0,
+            targetIndex - radius);
+
         var endIndex = Math.Min(
             lines.Length - 1,
             targetIndex + radius);
 
-        var contextLines = new List<SourceContextLine>();
+        var contextLines =
+            new List<SourceContextLine>();
 
         for (var i = startIndex; i <= endIndex; i++)
         {
@@ -50,10 +91,29 @@ public sealed class SourceContextReader
 
         return new SourceContext
         {
-            FilePath = filePath,
+            FilePath = fullPath,
             TargetLine = lineNumber.Value,
             Lines = contextLines
         };
+    }
+
+    private bool IsInsideRepository(
+        string fullPath)
+    {
+        if (string.IsNullOrWhiteSpace(_repositoryRoot))
+        {
+            return false;
+        }
+
+        var relativePath = Path.GetRelativePath(
+            _repositoryRoot,
+            fullPath);
+
+        return relativePath != ".." &&
+               !relativePath.StartsWith(
+                   $"..{Path.DirectorySeparatorChar}",
+                   StringComparison.Ordinal) &&
+               !Path.IsPathRooted(relativePath);
     }
 }
 
@@ -63,7 +123,8 @@ public sealed record SourceContext
 
     public required int TargetLine { get; init; }
 
-    public required IReadOnlyList<SourceContextLine> Lines { get; init; }
+    public required IReadOnlyList<SourceContextLine>
+        Lines { get; init; }
 }
 
 public sealed record SourceContextLine

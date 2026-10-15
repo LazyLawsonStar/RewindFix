@@ -4,4 +4,6 @@ public sealed class RewindFixOptions
 {
     public AutomationLevel AutomationLevel { get; set; }
         = AutomationLevel.Analyze;
+
+    public string? RepositoryRoot { get; set; }
 }

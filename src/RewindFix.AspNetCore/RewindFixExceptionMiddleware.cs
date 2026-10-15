@@ -1,6 +1,4 @@
 using System.Diagnostics;
-using System.Net.Http.Json;
-using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using RewindFix.AspNetCore.Models;
@@ -9,20 +7,18 @@ namespace RewindFix.AspNetCore;
 
 public sealed class RewindFixExceptionMiddleware
 {
-    private static readonly HttpClient HttpClient = new()
-    {
-        Timeout = TimeSpan.FromSeconds(3)
-    };
-
     private readonly RequestDelegate _next;
     private readonly ILogger<RewindFixExceptionMiddleware> _logger;
+    private readonly CrashReportQueue _queue;
 
     public RewindFixExceptionMiddleware(
         RequestDelegate next,
-        ILogger<RewindFixExceptionMiddleware> logger)
+        ILogger<RewindFixExceptionMiddleware> logger,
+        CrashReportQueue queue)
     {
         _next = next;
         _logger = logger;
+        _queue = queue;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -33,64 +29,25 @@ public sealed class RewindFixExceptionMiddleware
         }
         catch (Exception exception)
         {
-            var report = CreateCrashReport(context, exception);
+            var report = CreateCrashReport(
+                context,
+                exception);
 
-            LogCrash(report, exception);
+            _logger.LogError(
+                exception,
+                "RewindFix captured crash {CrashId} at {Method} {Path}",
+                report.CrashId,
+                report.Request.Method,
+                report.Request.Path);
 
-            await TrySendCrashAsync(report);
-
-            throw;
-        }
-    }
-
-    private void LogCrash(
-        CrashReport report,
-        Exception exception)
-    {
-        var json = JsonSerializer.Serialize(
-            report,
-            new JsonSerializerOptions
-            {
-                WriteIndented = true
-            });
-
-        _logger.LogError(
-            exception,
-            "RewindFix captured crash {CrashId}\n{CrashReport}",
-            report.CrashId,
-            json);
-    }
-
-    private async Task TrySendCrashAsync(CrashReport report)
-    {
-        try
-        {
-            var response = await HttpClient.PostAsJsonAsync(
-                "http://localhost:5000/api/crashes",
-                report);
-
-            if (response.IsSuccessStatusCode)
-            {
-                _logger.LogInformation(
-                    "RewindFix successfully sent crash {CrashId}",
-                    report.CrashId);
-            }
-            else
+            if (!_queue.TryEnqueue(report))
             {
                 _logger.LogWarning(
-                    "RewindFix server returned HTTP {StatusCode} for crash {CrashId}",
-                    (int)response.StatusCode,
+                    "RewindFix crash queue is full. Crash {CrashId} was dropped.",
                     report.CrashId);
             }
-        }
-        catch (Exception exception)
-        {
-            // RewindFix НИКОГДА не должен ломать приложение клиента,
-            // если наш сервер недоступен.
-            _logger.LogWarning(
-                exception,
-                "RewindFix could not send crash {CrashId}",
-                report.CrashId);
+
+            throw;
         }
     }
 
