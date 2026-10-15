@@ -185,6 +185,7 @@ public sealed class GitPatchPublisher
             return;
         }
 
+        // 1. Remove temporary worktree.
         await RunGitAsync(
             workspace.RepositoryRoot,
             CancellationToken.None,
@@ -193,11 +194,26 @@ public sealed class GitPatchPublisher
             "--force",
             workspace.WorkspacePath);
 
+        // 2. Remove stale worktree metadata.
         await RunGitAsync(
             workspace.RepositoryRoot,
             CancellationToken.None,
             "worktree",
             "prune");
+
+        // 3. Remove the temporary local branch.
+        // The remote branch, if it was already pushed,
+        // is NOT affected by this.
+        if (!string.IsNullOrWhiteSpace(
+                workspace.BranchName))
+        {
+            await RunGitAsync(
+                workspace.RepositoryRoot,
+                CancellationToken.None,
+                "branch",
+                "-D",
+                workspace.BranchName);
+        }
     }
 
     private static GitPatchResult Fail(
