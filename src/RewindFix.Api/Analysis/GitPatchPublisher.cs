@@ -1,26 +1,51 @@
 using System.Diagnostics;
+using Microsoft.Extensions.Options;
+using RewindFix.Api.Configuration;
 
 namespace RewindFix.Api.Analysis;
 
 public sealed class GitPatchPublisher
 {
-    public async Task<GitPatchResult> PrepareAsync(
-        CodePatch patch)
-    {
-        var repositoryRoot = FindRepositoryRoot(
-            Path.GetDirectoryName(patch.FilePath));
+    private readonly RewindFixOptions _rewindFixOptions;
+    private readonly GitHubOptions _gitHubOptions;
 
-        if (repositoryRoot is null)
+    public GitPatchPublisher(
+        IOptions<RewindFixOptions> rewindFixOptions,
+        IOptions<GitHubOptions> gitHubOptions)
+    {
+        _rewindFixOptions = rewindFixOptions.Value;
+        _gitHubOptions = gitHubOptions.Value;
+    }
+
+    public async Task<GitWorkspaceResult> CreateWorkspaceAsync(
+        Guid crashId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(
+                _rewindFixOptions.RepositoryRoot))
         {
-            return new GitPatchResult
-            {
-                Success = false,
-                Error = "Unable to find Git repository root."
-            };
+            return GitWorkspaceResult.Fail(
+                "RepositoryRoot is not configured.");
+        }
+
+        var repositoryRoot = Path.GetFullPath(
+            _rewindFixOptions.RepositoryRoot);
+
+        if (!Directory.Exists(repositoryRoot))
+        {
+            return GitWorkspaceResult.Fail(
+                "Configured repository root does not exist.");
+        }
+
+        if (string.IsNullOrWhiteSpace(
+                _gitHubOptions.BaseBranch))
+        {
+            return GitWorkspaceResult.Fail(
+                "GitHub BaseBranch is not configured.");
         }
 
         var branchName =
-            $"rewindfix/{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
+            $"rewindfix/{crashId:N}-{Guid.NewGuid():N}";
 
         var workspacePath = Path.Combine(
             Path.GetTempPath(),
@@ -31,203 +56,182 @@ public sealed class GitPatchPublisher
         Directory.CreateDirectory(
             Path.GetDirectoryName(workspacePath)!);
 
-        var worktreeResult = await RunGitAsync(
+        var fetch = await RunGitAsync(
             repositoryRoot,
-            $"worktree add -b \"{branchName}\" \"{workspacePath}\"");
+            cancellationToken,
+            "fetch",
+            "origin",
+            _gitHubOptions.BaseBranch);
 
-        if (!worktreeResult.Success)
+        if (!fetch.Success)
+        {
+            return GitWorkspaceResult.Fail(
+                $"Git fetch failed: {fetch.Error}");
+        }
+
+        var create = await RunGitAsync(
+            repositoryRoot,
+            cancellationToken,
+            "worktree",
+            "add",
+            "-b",
+            branchName,
+            workspacePath,
+            $"origin/{_gitHubOptions.BaseBranch}");
+
+        if (!create.Success)
+        {
+            return GitWorkspaceResult.Fail(
+                $"Unable to create worktree: {create.Error}");
+        }
+
+        return new GitWorkspaceResult
+        {
+            Success = true,
+            BranchName = branchName,
+            WorkspacePath = workspacePath,
+            RepositoryRoot = repositoryRoot
+        };
+    }
+
+    public async Task<GitPatchResult> PublishAsync(
+        GitWorkspaceResult workspace,
+        string relativeFilePath,
+        CancellationToken cancellationToken = default)
+    {
+        if (!workspace.Success ||
+            string.IsNullOrWhiteSpace(workspace.WorkspacePath) ||
+            string.IsNullOrWhiteSpace(workspace.BranchName))
         {
             return new GitPatchResult
             {
                 Success = false,
-                BranchName = branchName,
-                WorkspacePath = workspacePath,
-                Error = worktreeResult.Error
+                Error = "Git workspace is invalid."
             };
         }
 
-        try
+        var add = await RunGitAsync(
+            workspace.WorkspacePath,
+            cancellationToken,
+            "add",
+            "--",
+            relativeFilePath);
+
+        if (!add.Success)
         {
-            var relativeFilePath = Path.GetRelativePath(
-                repositoryRoot,
-                patch.FilePath);
-
-            var workspaceFilePath = Path.Combine(
-                workspacePath,
-                relativeFilePath);
-
-            await ApplyPatchAsync(
-                workspaceFilePath,
-                patch);
-
-            var addResult = await RunGitAsync(
-                workspacePath,
-                $"add \"{relativeFilePath}\"");
-
-            if (!addResult.Success)
-            {
-                return new GitPatchResult
-                {
-                    Success = false,
-                    BranchName = branchName,
-                    WorkspacePath = workspacePath,
-                    Error = addResult.Error
-                };
-            }
-
-            var commitResult = await RunGitAsync(
-                workspacePath,
-                "commit -m \"Apply RewindFix generated patch\"");
-
-            if (!commitResult.Success)
-            {
-                return new GitPatchResult
-                {
-                    Success = false,
-                    BranchName = branchName,
-                    WorkspacePath = workspacePath,
-                    Error = commitResult.Error
-                };
-            }
-
-            var shaResult = await RunGitAsync(
-                workspacePath,
-                "rev-parse HEAD");
-
-            if (!shaResult.Success)
-            {
-                return new GitPatchResult
-                {
-                    Success = false,
-                    BranchName = branchName,
-                    WorkspacePath = workspacePath,
-                    Error = shaResult.Error
-                };
-            }
-
-            var pushResult = await RunGitAsync(
-                workspacePath,
-                $"push -u origin \"{branchName}\"");
-
-            if (!pushResult.Success)
-            {
-                return new GitPatchResult
-                {
-                    Success = false,
-                    BranchName = branchName,
-                    CommitSha = shaResult.Output.Trim(),
-                    WorkspacePath = workspacePath,
-                    Error = pushResult.Error
-                };
-            }
-
-            return new GitPatchResult
-            {
-                Success = true,
-                BranchName = branchName,
-                CommitSha = shaResult.Output.Trim(),
-                WorkspacePath = workspacePath
-            };
+            return Fail(workspace, add.Error);
         }
-        catch (Exception exception)
+
+        var commit = await RunGitAsync(
+            workspace.WorkspacePath,
+            cancellationToken,
+            "commit",
+            "-m",
+            "Apply RewindFix generated patch");
+
+        if (!commit.Success)
+        {
+            return Fail(workspace, commit.Error);
+        }
+
+        var sha = await RunGitAsync(
+            workspace.WorkspacePath,
+            cancellationToken,
+            "rev-parse",
+            "HEAD");
+
+        if (!sha.Success)
+        {
+            return Fail(workspace, sha.Error);
+        }
+
+        var push = await RunGitAsync(
+            workspace.WorkspacePath,
+            cancellationToken,
+            "push",
+            "-u",
+            "origin",
+            workspace.BranchName);
+
+        if (!push.Success)
         {
             return new GitPatchResult
             {
                 Success = false,
-                BranchName = branchName,
-                WorkspacePath = workspacePath,
-                Error = exception.Message
+                BranchName = workspace.BranchName,
+                CommitSha = sha.Output.Trim(),
+                WorkspacePath = workspace.WorkspacePath,
+                Error = push.Error
             };
         }
+
+        return new GitPatchResult
+        {
+            Success = true,
+            BranchName = workspace.BranchName,
+            CommitSha = sha.Output.Trim(),
+            WorkspacePath = workspace.WorkspacePath
+        };
     }
 
-    private static async Task ApplyPatchAsync(
-        string filePath,
-        CodePatch patch)
+    public async Task CleanupAsync(
+        GitWorkspaceResult workspace)
     {
-        var lines = await File.ReadAllLinesAsync(filePath);
-
-        var targetIndex = patch.TargetLine - 1;
-
-        if (targetIndex < 0 ||
-            targetIndex >= lines.Length)
+        if (string.IsNullOrWhiteSpace(
+                workspace.RepositoryRoot) ||
+            string.IsNullOrWhiteSpace(
+                workspace.WorkspacePath))
         {
-            throw new InvalidOperationException(
-                "Patch target line is invalid.");
+            return;
         }
 
-        if (!string.Equals(
-                lines[targetIndex].Trim(),
-                patch.OriginalCode.Trim(),
-                StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                "Patch target no longer matches original code.");
-        }
+        await RunGitAsync(
+            workspace.RepositoryRoot,
+            CancellationToken.None,
+            "worktree",
+            "remove",
+            "--force",
+            workspace.WorkspacePath);
 
-        var replacementLines = patch.ReplacementCode
-            .Replace("\r\n", "\n")
-            .Split('\n');
-
-        var indentation =
-            GetIndentation(lines[targetIndex]);
-
-        var result = new List<string>();
-
-        result.AddRange(lines[..targetIndex]);
-
-        foreach (var replacementLine in replacementLines)
-        {
-            if (string.IsNullOrWhiteSpace(replacementLine))
-            {
-                result.Add(string.Empty);
-            }
-            else
-            {
-                result.Add(indentation + replacementLine);
-            }
-        }
-
-        result.AddRange(lines[(targetIndex + 1)..]);
-
-        await File.WriteAllLinesAsync(
-            filePath,
-            result);
+        await RunGitAsync(
+            workspace.RepositoryRoot,
+            CancellationToken.None,
+            "worktree",
+            "prune");
     }
 
-    private static string? FindRepositoryRoot(
-        string? directory)
+    private static GitPatchResult Fail(
+        GitWorkspaceResult workspace,
+        string error)
     {
-        while (!string.IsNullOrWhiteSpace(directory))
+        return new GitPatchResult
         {
-            if (Directory.Exists(
-                    Path.Combine(directory, ".git")))
-            {
-                return directory;
-            }
-
-            directory = Directory
-                .GetParent(directory)?
-                .FullName;
-        }
-
-        return null;
+            Success = false,
+            BranchName = workspace.BranchName,
+            WorkspacePath = workspace.WorkspacePath,
+            Error = error
+        };
     }
 
     private static async Task<GitCommandResult> RunGitAsync(
         string workingDirectory,
-        string arguments)
+        CancellationToken cancellationToken,
+        params string[] arguments)
     {
         var startInfo = new ProcessStartInfo
         {
             FileName = "git",
-            Arguments = arguments,
             WorkingDirectory = workingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true
         };
+
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
 
         using var process = new Process
         {
@@ -242,27 +246,39 @@ public sealed class GitPatchPublisher
         var errorTask =
             process.StandardError.ReadToEndAsync();
 
-        await process.WaitForExitAsync();
-
-        var output = await outputTask;
-        var error = await errorTask;
+        try
+        {
+            await process.WaitForExitAsync(
+                cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            TryKill(process);
+            throw;
+        }
 
         return new GitCommandResult
         {
             Success = process.ExitCode == 0,
-            Output = output,
-            Error = error
+            Output = await outputTask,
+            Error = await errorTask
         };
     }
 
-    private static string GetIndentation(
-        string line)
+    private static void TryKill(Process process)
     {
-        var length =
-            line.Length -
-            line.TrimStart().Length;
-
-        return line[..length];
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(
+                    entireProcessTree: true);
+            }
+        }
+        catch
+        {
+            // Best-effort cleanup.
+        }
     }
 
     private sealed record GitCommandResult

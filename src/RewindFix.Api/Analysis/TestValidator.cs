@@ -5,17 +5,15 @@ namespace RewindFix.Api.Analysis;
 public sealed class TestValidator
 {
     public async Task<TestValidationResult> ValidateAsync(
-        string workspacePath)
+        string workspacePath,
+        CancellationToken cancellationToken = default)
     {
         var testProjects = Directory
             .EnumerateFiles(
                 workspacePath,
                 "*.csproj",
                 SearchOption.AllDirectories)
-            .Where(path =>
-                path.Contains(
-                    "test",
-                    StringComparison.OrdinalIgnoreCase))
+            .Where(IsTestProject)
             .ToList();
 
         if (testProjects.Count == 0)
@@ -30,56 +28,32 @@ public sealed class TestValidator
             };
         }
 
-        var combinedOutput = new List<string>();
-        var combinedErrors = new List<string>();
+        var output = new List<string>();
+        var errors = new List<string>();
 
         foreach (var testProject in testProjects)
         {
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = "dotnet",
-                Arguments = $"test \"{testProject}\" --no-restore",
-                WorkingDirectory = workspacePath,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
+            var result = await RunTestAsync(
+                workspacePath,
+                testProject,
+                cancellationToken);
 
-            using var process = new Process
-            {
-                StartInfo = startInfo
-            };
+            output.Add(result.Output);
+            errors.Add(result.Error);
 
-            process.Start();
-
-            var outputTask =
-                process.StandardOutput.ReadToEndAsync();
-
-            var errorTask =
-                process.StandardError.ReadToEndAsync();
-
-            await process.WaitForExitAsync();
-
-            var output = await outputTask;
-            var errorOutput = await errorTask;
-
-            combinedOutput.Add(output);
-            combinedErrors.Add(errorOutput);
-
-            if (process.ExitCode != 0)
+            if (!result.Success)
             {
                 return new TestValidationResult
                 {
                     Success = false,
                     TestsFound = true,
-                    ExitCode = process.ExitCode,
+                    ExitCode = result.ExitCode,
                     Output = string.Join(
                         Environment.NewLine,
-                        combinedOutput),
+                        output),
                     ErrorOutput = string.Join(
                         Environment.NewLine,
-                        combinedErrors)
+                        errors)
                 };
             }
         }
@@ -91,10 +65,117 @@ public sealed class TestValidator
             ExitCode = 0,
             Output = string.Join(
                 Environment.NewLine,
-                combinedOutput),
+                output),
             ErrorOutput = string.Join(
                 Environment.NewLine,
-                combinedErrors)
+                errors)
         };
     }
+
+    private static bool IsTestProject(
+        string path)
+    {
+        if (ContainsDirectory(path, "bin") ||
+            ContainsDirectory(path, "obj"))
+        {
+            return false;
+        }
+
+        var name =
+            Path.GetFileNameWithoutExtension(path);
+
+        return name.EndsWith(
+                   ".Tests",
+                   StringComparison.OrdinalIgnoreCase) ||
+               name.EndsWith(
+                   ".Test",
+                   StringComparison.OrdinalIgnoreCase) ||
+               name.EndsWith(
+                   ".IntegrationTests",
+                   StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ContainsDirectory(
+        string path,
+        string directory)
+    {
+        var marker =
+            $"{Path.DirectorySeparatorChar}" +
+            directory +
+            $"{Path.DirectorySeparatorChar}";
+
+        return path.Contains(
+            marker,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<ProcessResult> RunTestAsync(
+        string workingDirectory,
+        string testProject,
+        CancellationToken cancellationToken)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "dotnet",
+            WorkingDirectory = workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        startInfo.ArgumentList.Add("test");
+        startInfo.ArgumentList.Add(testProject);
+
+        using var process = new Process
+        {
+            StartInfo = startInfo
+        };
+
+        process.Start();
+
+        var outputTask =
+            process.StandardOutput.ReadToEndAsync();
+
+        var errorTask =
+            process.StandardError.ReadToEndAsync();
+
+        try
+        {
+            await process.WaitForExitAsync(
+                cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            TryKill(process);
+            throw;
+        }
+
+        return new ProcessResult(
+            process.ExitCode == 0,
+            process.ExitCode,
+            await outputTask,
+            await errorTask);
+    }
+
+    private static void TryKill(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(
+                    entireProcessTree: true);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private sealed record ProcessResult(
+        bool Success,
+        int ExitCode,
+        string Output,
+        string Error);
 }

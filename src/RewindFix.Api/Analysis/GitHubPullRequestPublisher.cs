@@ -10,18 +10,23 @@ public sealed class GitHubPullRequestPublisher
 {
     private readonly HttpClient _httpClient;
     private readonly GitHubOptions _options;
+    private readonly RewindFixOptions _rewindFixOptions;
 
     public GitHubPullRequestPublisher(
         HttpClient httpClient,
-        IOptions<GitHubOptions> options)
+        IOptions<GitHubOptions> options,
+        IOptions<RewindFixOptions> rewindFixOptions)
     {
         _httpClient = httpClient;
         _options = options.Value;
+        _rewindFixOptions = rewindFixOptions.Value;
     }
 
     public async Task<PullRequestResult> CreateAsync(
         string branchName,
-        CodePatch patch)
+        CodePatch patch,
+        TestValidationResult testValidation,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(_options.Token))
         {
@@ -42,6 +47,23 @@ public sealed class GitHubPullRequestPublisher
             };
         }
 
+        var relativeFilePath =
+            GetRelativeFilePath(patch.FilePath);
+
+        if (relativeFilePath is null)
+        {
+            return new PullRequestResult
+            {
+                Success = false,
+                Error =
+                    "Patch file is outside configured repository root."
+            };
+        }
+
+        var testStatus = testValidation.TestsFound
+            ? "Tests found and passed."
+            : "No test projects were found.";
+
         var request = new HttpRequestMessage(
             HttpMethod.Post,
             $"https://api.github.com/repos/{_options.Owner}/{_options.Repository}/pulls");
@@ -51,7 +73,8 @@ public sealed class GitHubPullRequestPublisher
                 "Bearer",
                 _options.Token);
 
-        request.Headers.UserAgent.ParseAdd("RewindFix");
+        request.Headers.UserAgent.ParseAdd(
+            "RewindFix");
 
         request.Headers.Accept.Add(
             new MediaTypeWithQualityHeaderValue(
@@ -67,7 +90,7 @@ public sealed class GitHubPullRequestPublisher
                 Generated automatically by RewindFix.
 
                 File:
-                {patch.FilePath}
+                {relativeFilePath}
 
                 Line:
                 {patch.TargetLine}
@@ -75,18 +98,22 @@ public sealed class GitHubPullRequestPublisher
                 Confidence:
                 {patch.Confidence}
 
-                Build validation passed.
-                Test validation passed.
+                Validation:
+                - Build passed.
+                - {testStatus}
                 """
         });
 
         try
         {
             var response =
-                await _httpClient.SendAsync(request);
+                await _httpClient.SendAsync(
+                    request,
+                    cancellationToken);
 
             var content =
-                await response.Content.ReadAsStringAsync();
+                await response.Content.ReadAsStringAsync(
+                    cancellationToken);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -114,6 +141,15 @@ public sealed class GitHubPullRequestPublisher
                         .GetString()
             };
         }
+        catch (OperationCanceledException)
+        {
+            return new PullRequestResult
+            {
+                Success = false,
+                Error =
+                    "GitHub Pull Request request was cancelled."
+            };
+        }
         catch (Exception exception)
         {
             return new PullRequestResult
@@ -122,5 +158,39 @@ public sealed class GitHubPullRequestPublisher
                 Error = exception.Message
             };
         }
+    }
+
+    private string? GetRelativeFilePath(
+        string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(
+                _rewindFixOptions.RepositoryRoot))
+        {
+            return null;
+        }
+
+        var root = Path.GetFullPath(
+            _rewindFixOptions.RepositoryRoot);
+
+        var candidate =
+            Path.GetFullPath(filePath);
+
+        var relative =
+            Path.GetRelativePath(
+                root,
+                candidate);
+
+        if (relative == ".." ||
+            relative.StartsWith(
+                $"..{Path.DirectorySeparatorChar}",
+                StringComparison.Ordinal) ||
+            Path.IsPathRooted(relative))
+        {
+            return null;
+        }
+
+        return relative.Replace(
+            Path.DirectorySeparatorChar,
+            '/');
     }
 }

@@ -5,105 +5,135 @@ namespace RewindFix.Api.Analysis;
 public sealed class PatchValidator
 {
     public async Task<PatchValidationResult> ValidateAsync(
-        CodePatch patch)
+        string workspacePath,
+        CancellationToken cancellationToken = default)
     {
-        if (!File.Exists(patch.FilePath))
+        if (!Directory.Exists(workspacePath))
         {
-            return new PatchValidationResult
-            {
-                Success = false,
-                ExitCode = -1,
-                Output = string.Empty,
-                ErrorOutput = "Source file does not exist."
-            };
+            return Fail(
+                "Validation workspace does not exist.");
         }
 
-        var projectDirectory = FindProjectDirectory(
-            Path.GetDirectoryName(patch.FilePath));
+        var target = FindBuildTarget(workspacePath);
 
-        if (projectDirectory is null)
+        if (target is null)
         {
-            return new PatchValidationResult
-            {
-                Success = false,
-                ExitCode = -1,
-                Output = string.Empty,
-                ErrorOutput = "Unable to find project directory."
-            };
+            return Fail(
+                "No solution or project was found.");
         }
 
-        var repositoryRoot = FindRepositoryRoot(projectDirectory);
-
-        if (repositoryRoot is null)
-        {
-            return new PatchValidationResult
-            {
-                Success = false,
-                ExitCode = -1,
-                Output = string.Empty,
-                ErrorOutput = "Unable to find repository root."
-            };
-        }
-
-        var workspacePath = Path.Combine(
-            Path.GetTempPath(),
-            "RewindFix",
-            Guid.NewGuid().ToString("N"));
-
-        Directory.CreateDirectory(workspacePath);
-
-        CopyDirectory(
-            repositoryRoot,
-            workspacePath);
-
-        var relativeSourceFilePath = Path.GetRelativePath(
-            repositoryRoot,
-            patch.FilePath);
-
-        var workspaceFilePath = Path.Combine(
+        var restore = await RunDotNetAsync(
             workspacePath,
-            relativeSourceFilePath);
+            cancellationToken,
+            "restore",
+            target);
 
-        await ApplyPatchAsync(
-            workspaceFilePath,
-            patch);
-
-        var relativeProjectPath = Path.GetRelativePath(
-            repositoryRoot,
-            projectDirectory);
-
-        var workspaceProjectDirectory = Path.Combine(
-            workspacePath,
-            relativeProjectPath);
-
-        var projectFile = Directory
-            .EnumerateFiles(
-                workspaceProjectDirectory,
-                "*.csproj")
-            .FirstOrDefault();
-
-        if (projectFile is null)
+        if (!restore.Success)
         {
             return new PatchValidationResult
             {
                 Success = false,
-                ExitCode = -1,
-                Output = string.Empty,
-                ErrorOutput = "Project file was not found in workspace.",
+                ExitCode = restore.ExitCode,
+                Output = restore.Output,
+                ErrorOutput =
+                    "dotnet restore failed." +
+                    Environment.NewLine +
+                    restore.Error,
                 WorkspacePath = workspacePath
             };
         }
 
+        var build = await RunDotNetAsync(
+            workspacePath,
+            cancellationToken,
+            "build",
+            target,
+            "--no-restore");
+
+        return new PatchValidationResult
+        {
+            Success = build.Success,
+            ExitCode = build.ExitCode,
+            Output =
+                restore.Output +
+                Environment.NewLine +
+                build.Output,
+            ErrorOutput =
+                restore.Error +
+                Environment.NewLine +
+                build.Error,
+            WorkspacePath = workspacePath
+        };
+    }
+
+    private static string? FindBuildTarget(
+        string workspacePath)
+    {
+        var solution = Directory
+            .EnumerateFiles(
+                workspacePath,
+                "*.sln",
+                SearchOption.TopDirectoryOnly)
+            .Concat(
+                Directory.EnumerateFiles(
+                    workspacePath,
+                    "*.slnx",
+                    SearchOption.TopDirectoryOnly))
+            .FirstOrDefault();
+
+        if (solution is not null)
+        {
+            return solution;
+        }
+
+        return Directory
+            .EnumerateFiles(
+                workspacePath,
+                "*.csproj",
+                SearchOption.AllDirectories)
+            .FirstOrDefault(IsUsableProject);
+    }
+
+    private static bool IsUsableProject(
+        string path)
+    {
+        return !ContainsDirectory(path, "bin") &&
+               !ContainsDirectory(path, "obj");
+    }
+
+    private static bool ContainsDirectory(
+        string path,
+        string directory)
+    {
+        var marker =
+            $"{Path.DirectorySeparatorChar}" +
+            directory +
+            $"{Path.DirectorySeparatorChar}";
+
+        return path.Contains(
+            marker,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<ProcessResult> RunDotNetAsync(
+        string workingDirectory,
+        CancellationToken cancellationToken,
+        params string[] arguments)
+    {
         var startInfo = new ProcessStartInfo
         {
             FileName = "dotnet",
-            Arguments = $"build \"{projectFile}\"",
-            WorkingDirectory = workspacePath,
+            WorkingDirectory = workingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true
         };
+
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
 
         using var process = new Process
         {
@@ -118,216 +148,54 @@ public sealed class PatchValidator
         var errorTask =
             process.StandardError.ReadToEndAsync();
 
-        await process.WaitForExitAsync();
+        try
+        {
+            await process.WaitForExitAsync(
+                cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            TryKill(process);
+            throw;
+        }
 
-        var output = await outputTask;
-        var errorOutput = await errorTask;
+        return new ProcessResult(
+            process.ExitCode == 0,
+            process.ExitCode,
+            await outputTask,
+            await errorTask);
+    }
 
+    private static PatchValidationResult Fail(
+        string error)
+    {
         return new PatchValidationResult
         {
-            Success = process.ExitCode == 0,
-            ExitCode = process.ExitCode,
-            Output = output,
-            ErrorOutput = errorOutput,
-            WorkspacePath = workspacePath
+            Success = false,
+            ExitCode = -1,
+            Output = string.Empty,
+            ErrorOutput = error
         };
     }
 
-    private static async Task ApplyPatchAsync(
-        string filePath,
-        CodePatch patch)
+    private static void TryKill(Process process)
     {
-        var lines = await File.ReadAllLinesAsync(filePath);
-
-        var targetIndex = patch.TargetLine - 1;
-
-        if (targetIndex < 0 ||
-            targetIndex >= lines.Length)
+        try
         {
-            throw new InvalidOperationException(
-                "Patch target line is invalid.");
-        }
-
-        if (!string.Equals(
-                lines[targetIndex].Trim(),
-                patch.OriginalCode.Trim(),
-                StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                "Patch target no longer matches original code.");
-        }
-
-        var replacementLines = patch.ReplacementCode
-            .Replace("\r\n", "\n")
-            .Split('\n');
-
-        var indentation =
-            GetIndentation(lines[targetIndex]);
-
-        var result = new List<string>();
-
-        result.AddRange(lines[..targetIndex]);
-
-        foreach (var replacementLine in replacementLines)
-        {
-            if (string.IsNullOrWhiteSpace(replacementLine))
+            if (!process.HasExited)
             {
-                result.Add(string.Empty);
-            }
-            else
-            {
-                result.Add(indentation + replacementLine);
+                process.Kill(
+                    entireProcessTree: true);
             }
         }
-
-        result.AddRange(
-            lines[(targetIndex + 1)..]);
-
-        await File.WriteAllLinesAsync(
-            filePath,
-            result);
-    }
-
-    private static string? FindProjectDirectory(
-        string? directory)
-    {
-        while (!string.IsNullOrWhiteSpace(directory))
+        catch
         {
-            if (Directory
-                .EnumerateFiles(directory, "*.csproj")
-                .Any())
-            {
-                return directory;
-            }
-
-            directory = Directory
-                .GetParent(directory)?
-                .FullName;
-        }
-
-        return null;
-    }
-
-    private static string? FindRepositoryRoot(
-        string directory)
-    {
-        var current = directory;
-
-        while (!string.IsNullOrWhiteSpace(current))
-        {
-            var hasGitDirectory =
-                Directory.Exists(
-                    Path.Combine(current, ".git"));
-
-            var hasSolution =
-                Directory
-                    .EnumerateFiles(current, "*.sln")
-                    .Any() ||
-                Directory
-                    .EnumerateFiles(current, "*.slnx")
-                    .Any();
-
-            if (hasGitDirectory || hasSolution)
-            {
-                return current;
-            }
-
-            current = Directory
-                .GetParent(current)?
-                .FullName;
-        }
-
-        return null;
-    }
-
-    private static void CopyDirectory(
-        string source,
-        string destination)
-    {
-        foreach (var directory in Directory
-            .EnumerateDirectories(
-                source,
-                "*",
-                SearchOption.AllDirectories))
-        {
-            if (ShouldSkipPath(directory))
-            {
-                continue;
-            }
-
-            var relative =
-                Path.GetRelativePath(
-                    source,
-                    directory);
-
-            Directory.CreateDirectory(
-                Path.Combine(
-                    destination,
-                    relative));
-        }
-
-        foreach (var file in Directory
-            .EnumerateFiles(
-                source,
-                "*",
-                SearchOption.AllDirectories))
-        {
-            if (ShouldSkipPath(file))
-            {
-                continue;
-            }
-
-            if (Path.GetFileName(file)
-                .Contains(".rewindfix."))
-            {
-                continue;
-            }
-
-            var relative =
-                Path.GetRelativePath(
-                    source,
-                    file);
-
-            var target =
-                Path.Combine(
-                    destination,
-                    relative);
-
-            Directory.CreateDirectory(
-                Path.GetDirectoryName(target)!);
-
-            File.Copy(
-                file,
-                target,
-                overwrite: true);
         }
     }
 
-    private static bool ShouldSkipPath(
-        string path)
-    {
-        var separators = new[]
-        {
-            $"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}",
-            $"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}",
-            $"{Path.DirectorySeparatorChar}.git{Path.DirectorySeparatorChar}",
-            $"{Path.DirectorySeparatorChar}.vs{Path.DirectorySeparatorChar}"
-        };
-
-        return separators.Any(
-            separator =>
-                path.Contains(
-                    separator,
-                    StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static string GetIndentation(
-        string line)
-    {
-        var length =
-            line.Length -
-            line.TrimStart().Length;
-
-        return line[..length];
-    }
+    private sealed record ProcessResult(
+        bool Success,
+        int ExitCode,
+        string Output,
+        string Error);
 }

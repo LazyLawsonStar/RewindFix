@@ -28,6 +28,7 @@ builder.Services.AddSingleton<PatchApplier>();
 builder.Services.AddSingleton<PatchValidator>();
 builder.Services.AddSingleton<TestValidator>();
 builder.Services.AddSingleton<GitPatchPublisher>();
+builder.Services.AddSingleton<FixPipeline>();
 
 builder.Services.AddHttpClient<GitHubPullRequestPublisher>();
 
@@ -334,8 +335,7 @@ app.MapPost(
         RootCauseAnalyzer rootCauseAnalyzer,
         SuggestedFixGenerator fixGenerator,
         PatchGenerator patchGenerator,
-        PatchValidator patchValidator,
-        TestValidator testValidator,
+        FixPipeline fixPipeline,
         IOptions<RewindFixOptions> options) =>
 {
     if (options.Value.AutomationLevel <
@@ -382,25 +382,32 @@ app.MapPost(
         });
     }
 
-    var buildValidation =
-        await patchValidator.ValidateAsync(patch);
+    var pipelineResult =
+        await fixPipeline.ExecuteAsync(
+            id,
+            patch,
+            publish: false);
 
-    TestValidationResult? testValidation = null;
-
-    if (buildValidation.Success &&
-        !string.IsNullOrWhiteSpace(
-            buildValidation.WorkspacePath))
+    if (!pipelineResult.Success)
     {
-        testValidation =
-            await testValidator.ValidateAsync(
-                buildValidation.WorkspacePath);
+        return Results.BadRequest(new
+        {
+            Error = pipelineResult.Error,
+            Patch = patch,
+            BuildValidation =
+                pipelineResult.BuildValidation,
+            TestValidation =
+                pipelineResult.TestValidation
+        });
     }
 
     return Results.Ok(new
     {
         Patch = patch,
-        BuildValidation = buildValidation,
-        TestValidation = testValidation
+        BuildValidation =
+            pipelineResult.BuildValidation,
+        TestValidation =
+            pipelineResult.TestValidation
     });
 })
 .AddEndpointFilter<AdminApiKeyFilter>();
@@ -420,9 +427,7 @@ app.MapPost(
         RootCauseAnalyzer rootCauseAnalyzer,
         SuggestedFixGenerator fixGenerator,
         PatchGenerator patchGenerator,
-        PatchValidator patchValidator,
-        TestValidator testValidator,
-        GitPatchPublisher gitPatchPublisher,
+        FixPipeline fixPipeline,
         GitHubPullRequestPublisher pullRequestPublisher,
         IOptions<RewindFixOptions> options) =>
 {
@@ -470,54 +475,47 @@ app.MapPost(
         });
     }
 
-    var buildValidation =
-        await patchValidator.ValidateAsync(patch);
+    var pipelineResult =
+        await fixPipeline.ExecuteAsync(
+            id,
+            patch,
+            publish: true);
 
-    if (!buildValidation.Success ||
+    if (!pipelineResult.Success)
+    {
+        return Results.BadRequest(new
+        {
+            Error = pipelineResult.Error,
+            Patch = patch,
+            BuildValidation =
+                pipelineResult.BuildValidation,
+            TestValidation =
+                pipelineResult.TestValidation,
+            Git = pipelineResult.Git
+        });
+    }
+
+    if (pipelineResult.Git is null ||
         string.IsNullOrWhiteSpace(
-            buildValidation.WorkspacePath))
+            pipelineResult.Git.BranchName))
     {
         return Results.BadRequest(new
         {
             Error =
-                "Generated patch did not pass build validation.",
-            BuildValidation = buildValidation
-        });
-    }
-
-    var testValidation =
-        await testValidator.ValidateAsync(
-            buildValidation.WorkspacePath);
-
-    if (!testValidation.Success)
-    {
-        return Results.BadRequest(new
-        {
-            Error =
-                "Generated patch did not pass tests.",
-            BuildValidation = buildValidation,
-            TestValidation = testValidation
-        });
-    }
-
-    var gitResult =
-        await gitPatchPublisher.PrepareAsync(patch);
-
-    if (!gitResult.Success)
-    {
-        return Results.BadRequest(new
-        {
-            Error = "Unable to prepare Git fix.",
-            BuildValidation = buildValidation,
-            TestValidation = testValidation,
-            Git = gitResult
+                "Validated patch was not published.",
+            Patch = patch,
+            BuildValidation =
+                pipelineResult.BuildValidation,
+            TestValidation =
+                pipelineResult.TestValidation
         });
     }
 
     var pullRequest =
         await pullRequestPublisher.CreateAsync(
-            gitResult.BranchName!,
-            patch);
+            pipelineResult.Git.BranchName,
+            patch,
+            pipelineResult.TestValidation!);
 
     if (!pullRequest.Success)
     {
@@ -525,9 +523,12 @@ app.MapPost(
         {
             Error =
                 "Branch was pushed, but Pull Request creation failed.",
-            BuildValidation = buildValidation,
-            TestValidation = testValidation,
-            Git = gitResult,
+            Patch = patch,
+            BuildValidation =
+                pipelineResult.BuildValidation,
+            TestValidation =
+                pipelineResult.TestValidation,
+            Git = pipelineResult.Git,
             PullRequest = pullRequest
         });
     }
@@ -535,9 +536,11 @@ app.MapPost(
     return Results.Ok(new
     {
         Patch = patch,
-        BuildValidation = buildValidation,
-        TestValidation = testValidation,
-        Git = gitResult,
+        BuildValidation =
+            pipelineResult.BuildValidation,
+        TestValidation =
+            pipelineResult.TestValidation,
+        Git = pipelineResult.Git,
         PullRequest = pullRequest
     });
 })
