@@ -4,6 +4,8 @@ namespace RewindFix.Api.Analysis;
 
 public sealed class TestValidator
 {
+    private static readonly TimeSpan ProcessTimeout =
+    TimeSpan.FromMinutes(2);
     public async Task<TestValidationResult> ValidateAsync(
         string workspacePath,
         CancellationToken cancellationToken = default)
@@ -140,10 +142,31 @@ public sealed class TestValidator
         var errorTask =
             process.StandardError.ReadToEndAsync();
 
+        using var timeoutCts =
+            new CancellationTokenSource(ProcessTimeout);
+
+        using var linkedCts =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                timeoutCts.Token);
+
         try
         {
             await process.WaitForExitAsync(
-                cancellationToken);
+                linkedCts.Token);
+        }
+        catch (OperationCanceledException)
+            when (timeoutCts.IsCancellationRequested &&
+                !cancellationToken.IsCancellationRequested)
+        {
+            TryKill(process);
+
+            return new ProcessResult(
+                false,
+                -1,
+                await outputTask,
+                $"dotnet test timed out after " +
+                $"{ProcessTimeout.TotalSeconds:0} seconds.");
         }
         catch (OperationCanceledException)
         {

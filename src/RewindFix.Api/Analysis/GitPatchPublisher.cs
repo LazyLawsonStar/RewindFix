@@ -6,6 +6,9 @@ namespace RewindFix.Api.Analysis;
 
 public sealed class GitPatchPublisher
 {
+    private static readonly TimeSpan GitProcessTimeout =
+        TimeSpan.FromMinutes(2);
+
     private readonly RewindFixOptions _rewindFixOptions;
     private readonly GitHubOptions _gitHubOptions;
 
@@ -262,10 +265,33 @@ public sealed class GitPatchPublisher
         var errorTask =
             process.StandardError.ReadToEndAsync();
 
+        using var timeoutCts =
+            new CancellationTokenSource(GitProcessTimeout);
+
+        using var linkedCts =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                timeoutCts.Token);
+
         try
         {
             await process.WaitForExitAsync(
-                cancellationToken);
+                linkedCts.Token);
+        }
+        catch (OperationCanceledException)
+            when (timeoutCts.IsCancellationRequested &&
+                !cancellationToken.IsCancellationRequested)
+        {
+            TryKill(process);
+
+            return new GitCommandResult
+            {
+                Success = false,
+                Output = await outputTask,
+                Error =
+                    $"Git process timed out after " +
+                    $"{GitProcessTimeout.TotalSeconds:0} seconds."
+            };
         }
         catch (OperationCanceledException)
         {
