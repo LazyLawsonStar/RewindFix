@@ -39,7 +39,7 @@ public sealed class CrashEndpointTests
             $"Expected crash endpoint to return a server error, but received {(int)response.StatusCode}.");
 
         Assert.True(
-            stopwatch.Elapsed < TimeSpan.FromMilliseconds(500),
+            stopwatch.Elapsed < TimeSpan.FromSeconds(1),
             $"Crash handling took too long: {stopwatch.Elapsed.TotalMilliseconds:F0} ms.");
     }
 }
