@@ -66,7 +66,7 @@ app.MapGet("/api/crash", () =>
 {
     string? customerName = null;
 
-    return customerName!.ToUpper();
+    return customerName?.ToUpper() ?? string.Empty;
 });
 
 app.Run();
