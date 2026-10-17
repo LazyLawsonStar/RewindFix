@@ -27,6 +27,7 @@ builder.Services.AddSingleton<PatchGenerator>();
 builder.Services.AddSingleton<PatchApplier>();
 builder.Services.AddSingleton<PatchValidator>();
 builder.Services.AddSingleton<TestValidator>();
+builder.Services.AddSingleton<RegressionValidator>();
 builder.Services.AddSingleton<GitPatchPublisher>();
 builder.Services.AddSingleton<FixPipeline>();
 
@@ -390,7 +391,7 @@ app.MapPost(
 
     var pipelineResult =
         await fixPipeline.ExecuteAsync(
-            id,
+            crash,
             patch,
             publish: false,
             httpContext.RequestAborted);
@@ -488,7 +489,7 @@ app.MapPost(
 
     var pipelineResult =
         await fixPipeline.ExecuteAsync(
-            id,
+            crash,
             patch,
             publish: true,
             httpContext.RequestAborted);

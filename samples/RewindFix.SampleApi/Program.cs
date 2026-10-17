@@ -7,7 +7,9 @@ builder.Services.AddOpenApi();
 
 builder.Services.AddRewindFix(options =>
 {
-    options.ServerUrl = "http://localhost:5000";
+    options.ServerUrl =
+        builder.Configuration["RewindFix:ServerUrl"]
+        ?? "http://localhost:5000";
     options.SendTimeout = TimeSpan.FromSeconds(3);
     options.QueueCapacity = 1000;
     options.ApiKey =

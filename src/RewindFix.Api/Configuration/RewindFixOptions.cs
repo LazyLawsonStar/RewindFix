@@ -6,4 +6,6 @@ public sealed class RewindFixOptions
         = AutomationLevel.Analyze;
 
     public string? RepositoryRoot { get; set; }
+
+    public string? RegressionProject { get; set; }
 }

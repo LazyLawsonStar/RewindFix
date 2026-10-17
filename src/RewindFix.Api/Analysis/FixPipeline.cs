@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Options;
 using RewindFix.Api.Configuration;
+using RewindFix.Api.Entities;
 
 namespace RewindFix.Api.Analysis;
 
@@ -8,6 +9,7 @@ public sealed class FixPipeline
     private readonly PatchApplier _patchApplier;
     private readonly PatchValidator _patchValidator;
     private readonly TestValidator _testValidator;
+    private readonly RegressionValidator _regressionValidator;
     private readonly GitPatchPublisher _gitPublisher;
     private readonly RewindFixOptions _options;
 
@@ -15,18 +17,20 @@ public sealed class FixPipeline
         PatchApplier patchApplier,
         PatchValidator patchValidator,
         TestValidator testValidator,
+        RegressionValidator regressionValidator,
         GitPatchPublisher gitPublisher,
         IOptions<RewindFixOptions> options)
     {
         _patchApplier = patchApplier;
         _patchValidator = patchValidator;
         _testValidator = testValidator;
+        _regressionValidator = regressionValidator;
         _gitPublisher = gitPublisher;
         _options = options.Value;
     }
 
     public async Task<FixPipelineResult> ExecuteAsync(
-        Guid crashId,
+        Crash crash,
         CodePatch patch,
         bool publish,
         CancellationToken cancellationToken = default)
@@ -44,10 +48,9 @@ public sealed class FixPipeline
                     "Patch file is outside configured repository root.");
             }
 
-            workspace =
-                await _gitPublisher.CreateWorkspaceAsync(
-                    crashId,
-                    cancellationToken);
+            workspace = await _gitPublisher.CreateWorkspaceAsync(
+                crash.Id,
+                cancellationToken);
 
             if (!workspace.Success ||
                 string.IsNullOrWhiteSpace(
@@ -76,6 +79,20 @@ public sealed class FixPipeline
                     "Resolved patch path escaped workspace.");
             }
 
+            var beforeRegression =
+                await _regressionValidator.ValidateAsync(
+                    workspace.WorkspacePath,
+                    crash,
+                    expectCrash: true,
+                    cancellationToken);
+
+            if (!beforeRegression.Success)
+            {
+                return FixPipelineResult.Fail(
+                    "The original production failure could not be reproduced. " +
+                    beforeRegression.ErrorOutput);
+            }
+
             await _patchApplier.ApplyAsync(
                 workspaceFile,
                 patch,
@@ -93,6 +110,25 @@ public sealed class FixPipeline
                     Success = false,
                     Error =
                         "Generated patch did not pass build validation.",
+                    BuildValidation = build
+                };
+            }
+
+
+            var afterRegression =
+                await _regressionValidator.ValidateAsync(
+                    workspace.WorkspacePath,
+                    crash,
+                    expectCrash: false,
+                    cancellationToken);
+
+            if (!afterRegression.Success)
+            {
+                return new FixPipelineResult
+                {
+                    Success = false,
+                    Error =
+                        "The production failure still reproduces after the patch.",
                     BuildValidation = build
                 };
             }
