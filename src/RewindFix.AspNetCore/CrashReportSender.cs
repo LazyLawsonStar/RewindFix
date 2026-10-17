@@ -90,7 +90,11 @@ internal sealed class CrashReportSender
                 report.CrashId);
         }
         catch (OperationCanceledException)
-            when (!stoppingToken.IsCancellationRequested)
+            when (stoppingToken.IsCancellationRequested)
+        {
+            // Normal application shutdown.
+        }
+        catch (OperationCanceledException)
         {
             _logger.LogWarning(
                 "RewindFix timed out while sending crash {CrashId}",
