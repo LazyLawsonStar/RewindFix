@@ -21,7 +21,8 @@ public sealed class SourceContextReader
     public async Task<SourceContext?> ReadAsync(
         string? filePath,
         int? lineNumber,
-        int radius = 5)
+        int radius = 5,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(filePath))
         {
@@ -59,7 +60,9 @@ public sealed class SourceContextReader
             return null;
         }
 
-        var lines = await File.ReadAllLinesAsync(fullPath);
+        var lines = await File.ReadAllLinesAsync(
+            fullPath,
+            cancellationToken);
 
         if (lineNumber > lines.Length)
         {

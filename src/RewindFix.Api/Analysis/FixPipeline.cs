@@ -152,9 +152,9 @@ public sealed class FixPipeline
             };
         }
         catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
         {
-            return FixPipelineResult.Fail(
-                "Fix pipeline was cancelled or timed out.");
+            throw;
         }
         catch (Exception exception)
         {

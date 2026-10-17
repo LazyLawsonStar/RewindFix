@@ -266,7 +266,9 @@ app.MapPost(
         RootCauseAnalyzer rootCauseAnalyzer,
         SuggestedFixGenerator fixGenerator,
         PatchGenerator patchGenerator,
-        IOptions<RewindFixOptions> options) =>
+        FixPipeline fixPipeline,
+        IOptions<RewindFixOptions> options,
+        HttpContext httpContext) =>
 {
     if (options.Value.AutomationLevel <
         AutomationLevel.Patch)
@@ -336,7 +338,8 @@ app.MapPost(
         SuggestedFixGenerator fixGenerator,
         PatchGenerator patchGenerator,
         FixPipeline fixPipeline,
-        IOptions<RewindFixOptions> options) =>
+        IOptions<RewindFixOptions> options,
+        HttpContext httpContext) =>
 {
     if (options.Value.AutomationLevel <
         AutomationLevel.Validate)
@@ -347,7 +350,9 @@ app.MapPost(
 
     var crash = await db.Crashes
         .AsNoTracking()
-        .FirstOrDefaultAsync(x => x.Id == id);
+        .FirstOrDefaultAsync(
+            x => x.Id == id,
+            httpContext.RequestAborted);
 
     if (crash is null)
     {
@@ -357,7 +362,8 @@ app.MapPost(
     var sourceContext =
         await sourceReader.ReadAsync(
             crash.SourceFilePath,
-            crash.SourceLine);
+            crash.SourceLine,
+            cancellationToken: httpContext.RequestAborted);
 
     var rootCause =
         rootCauseAnalyzer.Analyze(
@@ -386,7 +392,8 @@ app.MapPost(
         await fixPipeline.ExecuteAsync(
             id,
             patch,
-            publish: false);
+            publish: false,
+            httpContext.RequestAborted);
 
     if (!pipelineResult.Success)
     {
@@ -429,7 +436,8 @@ app.MapPost(
         PatchGenerator patchGenerator,
         FixPipeline fixPipeline,
         GitHubPullRequestPublisher pullRequestPublisher,
-        IOptions<RewindFixOptions> options) =>
+        IOptions<RewindFixOptions> options,
+        HttpContext httpContext) =>
 {
     if (options.Value.AutomationLevel <
         AutomationLevel.Publish)
@@ -438,9 +446,11 @@ app.MapPost(
             StatusCodes.Status403Forbidden);
     }
 
-    var crash = await db.Crashes
+   var crash = await db.Crashes
         .AsNoTracking()
-        .FirstOrDefaultAsync(x => x.Id == id);
+        .FirstOrDefaultAsync(
+            x => x.Id == id,
+            httpContext.RequestAborted);
 
     if (crash is null)
     {
@@ -450,7 +460,8 @@ app.MapPost(
     var sourceContext =
         await sourceReader.ReadAsync(
             crash.SourceFilePath,
-            crash.SourceLine);
+            crash.SourceLine,
+            cancellationToken: httpContext.RequestAborted);
 
     var rootCause =
         rootCauseAnalyzer.Analyze(
@@ -479,7 +490,8 @@ app.MapPost(
         await fixPipeline.ExecuteAsync(
             id,
             patch,
-            publish: true);
+            publish: true,
+            httpContext.RequestAborted);
 
     if (!pipelineResult.Success)
     {
@@ -515,7 +527,8 @@ app.MapPost(
         await pullRequestPublisher.CreateAsync(
             pipelineResult.Git.BranchName,
             patch,
-            pipelineResult.TestValidation!);
+            pipelineResult.TestValidation!,
+            httpContext.RequestAborted);
 
     if (!pullRequest.Success)
     {
